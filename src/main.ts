@@ -188,34 +188,24 @@ export default class ConditionalRenderPlugin extends Plugin {
 	private readonly inputStates = new WeakMap<CRControlElement, InputState>();
 	private readonly dynamicRenderBindings = new WeakMap<HTMLElement, DynamicRenderBinding>();
 	private readonly dynamicRenderElements = new Set<HTMLElement>();
-	private readonly frontmatterSnapshots = new Map<string, string>();
+	private readonly expressionFnCache = new Map<string, Function | null>();
 	private refreshTimer: number | null = null;
-	private dynamicRefreshTimer: number | null = null;
+	private dynamicRefreshRaf: number | null = null;
+	private dynamicRefreshFallbackTimer: number | null = null;
+	private pendingDynamicRefreshAll = false;
+	private readonly pendingDynamicRefreshPaths = new Set<string>();
 
 	async onload() {
 		await this.loadSettings();
 		this.addSettingTab(new CRSettingTab(this.app, this));
-		console.log(t('log_loaded').replace('0.12.0', '0.15.1'));
+		console.log(t('log_loaded').replace('0.12.0', '0.15.5'));
 
 		this.registerProcessors();
 
 		this.registerEvent(
 			this.app.metadataCache.on('changed', (file) => {
-				this.scheduleSyncByPath(file.path);
-				const frontmatterChanged = this.didFrontmatterChange(file.path);
+				this.scheduleSyncByPath(file.path, { immediate: true, delayed: true });
 				this.scheduleDynamicRefresh(file.path);
-				if (frontmatterChanged) {
-					this.requestDebouncedRefresh(file.path);
-				}
-			}),
-		);
-
-		this.registerEvent(
-			this.app.vault.on('modify', (file) => {
-				if (file instanceof TFile && file.extension === 'md') {
-					this.scheduleSyncByPath(file.path);
-					this.scheduleDynamicRefresh(file.path);
-				}
 			}),
 		);
 	}
@@ -241,6 +231,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 		this.registerMarkdownPostProcessor((element, context) => {
 			const codeBlocks = Array.from(element.querySelectorAll('code'));
+			let hasDynamicWork = false;
 
 			for (const code of codeBlocks) {
 				if (code.parentElement?.tagName === 'PRE') continue;
@@ -248,6 +239,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 				if (!text) continue;
 
 				if (this.tryRenderInteractiveInput(code as HTMLElement, text, context)) {
+					hasDynamicWork = true;
 					continue;
 				}
 
@@ -276,6 +268,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 						style: activeStyle,
 					});
 					this.refreshDynamicRender(span);
+					hasDynamicWork = true;
 					continue;
 				}
 
@@ -308,6 +301,11 @@ export default class ConditionalRenderPlugin extends Plugin {
 					});
 				}
 				this.refreshDynamicRender(span);
+				hasDynamicWork = true;
+			}
+
+			if (hasDynamicWork) {
+				this.scheduleDynamicRefresh(context.sourcePath);
 			}
 		});
 	}
@@ -380,6 +378,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 				style: activeStyle,
 			});
 			this.refreshDynamicRender(container);
+			this.scheduleDynamicRefresh(ctx.sourcePath);
 		});
 	}
 
@@ -618,12 +617,6 @@ export default class ConditionalRenderPlugin extends Plugin {
 		}
 	}
 
-	private didFrontmatterChange(path: string): boolean {
-		const nextSnapshot = JSON.stringify(this.getFrontmatter(path) ?? {});
-		const prevSnapshot = this.frontmatterSnapshots.get(path);
-		this.frontmatterSnapshots.set(path, nextSnapshot);
-		return prevSnapshot !== nextSnapshot;
-	}
 
 	private computeInlineDefaultContent(rawContent: string, sourcePath: string): string {
 		let content = this.replaceVariables(rawContent, sourcePath);
@@ -711,16 +704,49 @@ export default class ConditionalRenderPlugin extends Plugin {
 		}
 	}
 
-	private scheduleDynamicRefresh(changedPath?: string) {
-		if (this.dynamicRefreshTimer) {
-			window.clearTimeout(this.dynamicRefreshTimer);
+	private flushDynamicRefreshQueue() {
+		const refreshAll = this.pendingDynamicRefreshAll;
+		const paths = refreshAll ? [] : Array.from(this.pendingDynamicRefreshPaths);
+		this.pendingDynamicRefreshAll = false;
+		this.pendingDynamicRefreshPaths.clear();
+
+		if (this.dynamicRefreshRaf !== null) {
+			window.cancelAnimationFrame(this.dynamicRefreshRaf);
+			this.dynamicRefreshRaf = null;
 		}
-		this.dynamicRefreshTimer = window.setTimeout(() => {
-			this.dynamicRefreshTimer = null;
-			this.refreshDynamicRenders(changedPath);
-		}, 80);
-		window.setTimeout(() => this.refreshDynamicRenders(changedPath), 220);
-		window.setTimeout(() => this.refreshDynamicRenders(changedPath), 500);
+		if (this.dynamicRefreshFallbackTimer !== null) {
+			window.clearTimeout(this.dynamicRefreshFallbackTimer);
+			this.dynamicRefreshFallbackTimer = null;
+		}
+
+		if (refreshAll || paths.length === 0) {
+			this.refreshDynamicRenders();
+			return;
+		}
+
+		for (const path of paths) {
+			this.refreshDynamicRenders(path);
+		}
+	}
+
+	private scheduleDynamicRefresh(changedPath?: string) {
+		if (changedPath) this.pendingDynamicRefreshPaths.add(changedPath);
+		else this.pendingDynamicRefreshAll = true;
+
+		if (this.dynamicRefreshRaf === null) {
+			this.dynamicRefreshRaf = window.requestAnimationFrame(() => {
+				this.dynamicRefreshRaf = null;
+				this.flushDynamicRefreshQueue();
+			});
+		}
+
+		if (this.dynamicRefreshFallbackTimer !== null) {
+			window.clearTimeout(this.dynamicRefreshFallbackTimer);
+		}
+		this.dynamicRefreshFallbackTimer = window.setTimeout(() => {
+			this.dynamicRefreshFallbackTimer = null;
+			this.flushDynamicRefreshQueue();
+		}, 140);
 	}
 
 	private renderInputError(codeEl: HTMLElement, message: string) {
@@ -1190,7 +1216,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 	private setupInputListeners(controlEl: CRControlElement) {
 		controlEl.addEventListener('focus', () => {
 			const state = this.getInputState(controlEl);
-			state.isEditing = this.isTextLikeControl(controlEl);
+			state.isEditing = true;
 		});
 
 		controlEl.addEventListener('blur', () => {
@@ -1387,9 +1413,8 @@ export default class ConditionalRenderPlugin extends Plugin {
 			await this.app.fileManager.processFrontMatter(file, (fm) => {
 				fm[yamlKey] = newValue;
 			});
-			this.scheduleSyncByPath(binding.sourcePath);
+			this.scheduleSyncByPath(binding.sourcePath, { immediate: false, delayed: true });
 			this.scheduleDynamicRefresh(binding.sourcePath);
-			this.requestDebouncedRefresh(binding.sourcePath);
 			return;
 		}
 
@@ -1399,39 +1424,39 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 		targetVar.value = typeof newValue === 'boolean' ? String(newValue) : String(newValue);
 		await this.saveSettings({ refreshViews: false, refreshDynamic: true });
-		this.syncAllInputs(undefined, { skipActiveTextInputs: true });
+		this.syncAllInputs(undefined, { skipActiveControls: true });
 	}
 
 	scheduleSyncForInput(controlEl: CRControlElement, mode: { immediate: boolean; delayed: boolean }) {
 		if (mode.immediate) {
-			this.syncSingleInput(controlEl, undefined, { skipActiveTextInputs: true });
+			this.syncSingleInput(controlEl, undefined, { skipActiveControls: true });
 		}
 		if (mode.delayed) {
-			window.setTimeout(() => this.syncSingleInput(controlEl, undefined, { skipActiveTextInputs: true }), 60);
-			window.setTimeout(() => this.syncSingleInput(controlEl, undefined, { skipActiveTextInputs: true }), 220);
-			window.setTimeout(() => this.syncSingleInput(controlEl, undefined, { skipActiveTextInputs: true }), 500);
+			window.setTimeout(() => this.syncSingleInput(controlEl, undefined, { skipActiveControls: true }), 140);
 		}
 	}
 
-	scheduleSyncByPath(path: string) {
-		this.syncAllInputs(path, { skipActiveTextInputs: true });
-		window.setTimeout(() => this.syncAllInputs(path, { skipActiveTextInputs: true }), 60);
-		window.setTimeout(() => this.syncAllInputs(path, { skipActiveTextInputs: true }), 220);
-		window.setTimeout(() => this.syncAllInputs(path, { skipActiveTextInputs: true }), 500);
+	scheduleSyncByPath(path: string, mode: { immediate: boolean; delayed: boolean } = { immediate: true, delayed: true }) {
+		if (mode.immediate) {
+			this.syncAllInputs(path, { skipActiveControls: true });
+		}
+		if (mode.delayed) {
+			window.setTimeout(() => this.syncAllInputs(path, { skipActiveControls: true }), 140);
+		}
 	}
 
 	syncSingleInput(
 		controlEl: CRControlElement,
 		changedPath?: string,
-		options: { skipActiveTextInputs?: boolean } = {},
+		options: { skipActiveControls?: boolean } = {},
 	) {
 		const binding = this.inputBindings.get(controlEl);
 		if (!binding) return;
 		if (changedPath && binding.spec.targetKind === 'yaml' && binding.sourcePath !== changedPath) return;
 
 		const state = this.getInputState(controlEl);
-		if (options.skipActiveTextInputs && this.isTextLikeControl(controlEl)) {
-			if (state.isEditing || state.isComposing || state.pendingCommitTimer) return;
+		if (options.skipActiveControls) {
+			if (state.isEditing || state.isComposing || state.pendingCommitTimer || document.activeElement === controlEl) return;
 		}
 
 		const resolved = this.resolveInputBinding(binding);
@@ -1569,7 +1594,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		this.applySelectOptions(controlEl, options, currentValue);
 	}
 
-	syncAllInputs(changedPath?: string, options: { skipActiveTextInputs?: boolean } = {}) {
+	syncAllInputs(changedPath?: string, options: { skipActiveControls?: boolean } = {}) {
 		const controls = document.querySelectorAll<HTMLElement>('[data-cr-control="true"]');
 		controls.forEach((controlEl) => this.syncSingleInput(controlEl as CRControlElement, changedPath, options));
 	}
@@ -1579,7 +1604,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		this.refreshTimer = window.setTimeout(() => {
 			this.refreshTimer = null;
 			this.refreshActiveViewsPreserveScroll(sourcePath);
-		}, 250);
+		}, 120);
 	}
 
 	private refreshActiveViewsPreserveScroll(sourcePath?: string) {
@@ -1608,12 +1633,9 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 	async saveSettings(options: { refreshViews?: boolean; refreshDynamic?: boolean; changedPath?: string } = {}) {
 		await this.saveData(this.settings);
-		this.syncAllInputs(undefined, { skipActiveTextInputs: true });
+		this.syncAllInputs(undefined, { skipActiveControls: true });
 		if (options.refreshDynamic !== false) {
 			this.scheduleDynamicRefresh(options.changedPath);
-			if (!options.changedPath) {
-				this.requestDebouncedRefresh();
-			}
 		}
 		if (options.refreshViews) this.requestDebouncedRefresh(options.changedPath);
 	}
@@ -1642,10 +1664,21 @@ export default class ConditionalRenderPlugin extends Plugin {
 		const keys = Object.keys(context);
 		const values = Object.values(context);
 		const frontmatter = this.getFrontmatter(sourcePath);
+		const cacheKey = `${keys.join('')}${expression}`;
+
+		let compiled = this.expressionFnCache.get(cacheKey);
+		if (compiled === undefined) {
+			try {
+				compiled = new Function(...keys, `return ${expression}`);
+			} catch {
+				compiled = null;
+			}
+			this.expressionFnCache.set(cacheKey, compiled);
+		}
+		if (!compiled) return undefined;
 
 		try {
-			const fn = new Function(...keys, `return ${expression}`);
-			return fn.apply(frontmatter, values);
+			return compiled.apply(frontmatter, values);
 		} catch {
 			return undefined;
 		}
