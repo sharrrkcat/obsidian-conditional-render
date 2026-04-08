@@ -46,7 +46,7 @@ done: false
 可用选择多种隐藏样式，比如`cr-sp "只有鼠标移上才会显示"`
 
 这篇文档`cr: this.published ? "已经发布" : "还没有发布"`。
-英雄的生命现在是：`cr-input: number(this.score, min=0, max=100, step=1)`
+英雄的生命现在是：`cr-input: number(this.HP, min=0, max=100, step=1)`
 学会了：`cr-input: bool(this.done)`
 ```
 
