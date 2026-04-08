@@ -65,6 +65,18 @@ interface InputState {
 	pendingCommitTimer: number | null;
 }
 
+interface DynamicRenderBinding {
+	sourcePath: string;
+	kind: 'inline-expression' | 'inline-default' | 'block';
+	style?: CRHiddenStyle;
+	expression?: string;
+	rawContent?: string;
+	condition?: string;
+	trueContent?: string;
+	falseContent?: string;
+	hasElse?: boolean;
+}
+
 const DEFAULT_SETTINGS: ConditionalRenderSettings = {
 	identifier: 'cr',
 	hiddenStyle: 'none',
@@ -117,7 +129,11 @@ export default class ConditionalRenderPlugin extends Plugin {
 	settings!: ConditionalRenderSettings;
 	private readonly inputBindings = new WeakMap<HTMLInputElement, InputBinding>();
 	private readonly inputStates = new WeakMap<HTMLInputElement, InputState>();
+	private readonly dynamicRenderBindings = new WeakMap<HTMLElement, DynamicRenderBinding>();
+	private readonly dynamicRenderElements = new Set<HTMLElement>();
+	private readonly frontmatterSnapshots = new Map<string, string>();
 	private refreshTimer: number | null = null;
+	private dynamicRefreshTimer: number | null = null;
 
 	async onload() {
 		await this.loadSettings();
@@ -129,6 +145,9 @@ export default class ConditionalRenderPlugin extends Plugin {
 		this.registerEvent(
 			this.app.metadataCache.on('changed', (file) => {
 				this.scheduleSyncByPath(file.path);
+				if (this.didFrontmatterChange(file.path)) {
+					this.scheduleDynamicRefresh(file.path);
+				}
 			}),
 		);
 
@@ -201,28 +220,24 @@ export default class ConditionalRenderPlugin extends Plugin {
 					}
 				}
 
+				const span = document.createElement('span');
+				code.replaceWith(span);
+
 				if (hasColon) {
-					const result = this.evaluateExpression(expressionRaw, context.sourcePath);
-					code.replaceWith(result !== undefined ? String(result) : `[Error: ${expressionRaw}]`);
-					continue;
-				}
-
-				let content = this.replaceVariables(expressionRaw, context.sourcePath);
-				const evalResult = this.evaluateExpression(content, context.sourcePath);
-				if (evalResult !== undefined) {
-					content = String(evalResult);
+					this.registerDynamicRender(span, {
+						sourcePath: context.sourcePath,
+						kind: 'inline-expression',
+						expression: expressionRaw,
+					});
 				} else {
-					const strMatch = content.match(/^["']([\s\S]*)["']$/);
-					if (strMatch) content = strMatch[1];
+					this.registerDynamicRender(span, {
+						sourcePath: context.sourcePath,
+						kind: 'inline-default',
+						rawContent: expressionRaw,
+						style: activeStyle,
+					});
 				}
-
-				const defaultVar = this.getDefaultVariable();
-				const isTrue = !!this.evaluateExpression(defaultVar, context.sourcePath);
-				if (isTrue) {
-					code.replaceWith(content);
-				} else {
-					this.renderHiddenInline(code as HTMLElement, activeStyle, content, context.sourcePath);
-				}
+				this.refreshDynamicRender(span);
 			}
 		});
 	}
@@ -281,67 +296,170 @@ export default class ConditionalRenderPlugin extends Plugin {
 				condition = 'true';
 			}
 
-			const isTrue = this.evaluateExpression(condition, ctx.sourcePath);
 			let activeStyle = this.settings.hiddenStyle;
 			if (overrideStyle) activeStyle = SHORT_NAME_MAP[overrideStyle] || overrideStyle;
 
-			let targetContent = '';
-			let shouldRenderHidden = false;
-			if (isTrue) {
-				targetContent = trueContent.join('\n');
-			} else if (hasElse) {
-				targetContent = falseContent.join('\n');
-			} else {
-				shouldRenderHidden = true;
-				targetContent = trueContent.join('\n');
-			}
-
-			targetContent = this.replaceVariables(targetContent, ctx.sourcePath);
-			if (!targetContent.trim()) return;
-
-			if (shouldRenderHidden) {
-				this.renderHiddenBlock(el, activeStyle, targetContent, ctx.sourcePath);
-			} else {
-				MarkdownRenderer.renderMarkdown(targetContent, el, ctx.sourcePath, this);
-			}
+			const container = el.createDiv();
+			this.registerDynamicRender(container, {
+				sourcePath: ctx.sourcePath,
+				kind: 'block',
+				condition,
+				trueContent: trueContent.join('\n'),
+				falseContent: falseContent.join('\n'),
+				hasElse,
+				style: activeStyle,
+			});
+			this.refreshDynamicRender(container);
 		});
 	}
 
-	renderHiddenInline(codeEl: HTMLElement, style: CRHiddenStyle, originalText: string, sourcePath: string) {
-		if (style === 'none') {
-			codeEl.replaceWith('');
-			return;
-		}
-
-		const span = document.createElement('span');
-		span.title = originalText;
-
-		if (style === 'text' || style === 'text-grey' || style === 'text-gray') {
-			span.className = style === 'text' ? 'cr-hidden-text' : 'cr-hidden-text-grey';
-			MarkdownRenderer.renderMarkdown(this.settings.hiddenCustomText, span, sourcePath, this).then(() => {
-				const p = span.querySelector('p');
-				if (p) span.innerHTML = p.innerHTML;
-			});
-		} else {
-			span.textContent = originalText;
-			span.className = `cr-hidden-${style}`;
-		}
-
-		codeEl.replaceWith(span);
+	private clearDynamicContainer(containerEl: HTMLElement) {
+		containerEl.className = '';
+		containerEl.style.display = '';
+		containerEl.removeAttribute('title');
+		containerEl.empty();
 	}
 
-	renderHiddenBlock(containerEl: HTMLElement, style: CRHiddenStyle, originalMarkdown: string, sourcePath: string) {
-		if (style === 'none') return;
-		const wrapper = containerEl.createDiv();
+	private renderHiddenInlineInto(containerEl: HTMLElement, style: CRHiddenStyle, originalText: string, sourcePath: string) {
+		this.clearDynamicContainer(containerEl);
 
-		if (style === 'text' || style === 'text-grey' || style === 'text-gray') {
-			wrapper.className = style === 'text' ? 'cr-block-text' : 'cr-block-text-grey';
-			MarkdownRenderer.renderMarkdown(this.settings.hiddenCustomText, wrapper, sourcePath, this);
+		if (style === 'none') {
+			containerEl.style.display = 'none';
 			return;
 		}
 
-		wrapper.className = `cr-block-${style}`;
-		MarkdownRenderer.renderMarkdown(originalMarkdown, wrapper, sourcePath, this);
+		containerEl.title = originalText;
+		if (style === 'text' || style === 'text-grey' || style === 'text-gray') {
+			containerEl.className = style === 'text' ? 'cr-hidden-text' : 'cr-hidden-text-grey';
+			MarkdownRenderer.renderMarkdown(this.settings.hiddenCustomText, containerEl, sourcePath, this).then(() => {
+				const p = containerEl.querySelector('p');
+				if (p) containerEl.innerHTML = p.innerHTML;
+			});
+			return;
+		}
+
+		containerEl.className = `cr-hidden-${style}`;
+		containerEl.textContent = originalText;
+	}
+
+	private renderHiddenBlockInto(containerEl: HTMLElement, style: CRHiddenStyle, originalMarkdown: string, sourcePath: string) {
+		this.clearDynamicContainer(containerEl);
+
+		if (style === 'none') {
+			containerEl.style.display = 'none';
+			return;
+		}
+
+		if (style === 'text' || style === 'text-grey' || style === 'text-gray') {
+			containerEl.className = style === 'text' ? 'cr-block-text' : 'cr-block-text-grey';
+			void MarkdownRenderer.renderMarkdown(this.settings.hiddenCustomText, containerEl, sourcePath, this);
+			return;
+		}
+
+		containerEl.className = `cr-block-${style}`;
+		void MarkdownRenderer.renderMarkdown(originalMarkdown, containerEl, sourcePath, this);
+	}
+
+	private registerDynamicRender(element: HTMLElement, binding: DynamicRenderBinding) {
+		this.dynamicRenderBindings.set(element, binding);
+		this.dynamicRenderElements.add(element);
+	}
+
+	private pruneDynamicRenderElements() {
+		for (const element of Array.from(this.dynamicRenderElements)) {
+			if (!element.isConnected) {
+				this.dynamicRenderElements.delete(element);
+			}
+		}
+	}
+
+	private didFrontmatterChange(path: string): boolean {
+		const nextSnapshot = JSON.stringify(this.getFrontmatter(path) ?? {});
+		const prevSnapshot = this.frontmatterSnapshots.get(path);
+		this.frontmatterSnapshots.set(path, nextSnapshot);
+		return prevSnapshot !== nextSnapshot;
+	}
+
+	private computeInlineDefaultContent(rawContent: string, sourcePath: string): string {
+		let content = this.replaceVariables(rawContent, sourcePath);
+		const evalResult = this.evaluateExpression(content, sourcePath);
+		if (evalResult !== undefined) {
+			content = String(evalResult);
+		} else {
+			const strMatch = content.match(/^["']([\s\S]*)["']$/);
+			if (strMatch) content = strMatch[1];
+		}
+		return content;
+	}
+
+	private refreshDynamicRender(element: HTMLElement) {
+		const binding = this.dynamicRenderBindings.get(element);
+		if (!binding) return;
+
+		if (binding.kind === 'inline-expression') {
+			this.clearDynamicContainer(element);
+			const result = this.evaluateExpression(binding.expression ?? '', binding.sourcePath);
+			element.textContent = result !== undefined ? String(result) : `[Error: ${binding.expression ?? ''}]`;
+			return;
+		}
+
+		if (binding.kind === 'inline-default') {
+			const content = this.computeInlineDefaultContent(binding.rawContent ?? '', binding.sourcePath);
+			const defaultVar = this.getDefaultVariable();
+			const isTrue = !!this.evaluateExpression(defaultVar, binding.sourcePath);
+			if (isTrue) {
+				this.clearDynamicContainer(element);
+				element.textContent = content;
+			} else {
+				this.renderHiddenInlineInto(element, binding.style ?? this.settings.hiddenStyle, content, binding.sourcePath);
+			}
+			return;
+		}
+
+		const isTrue = !!this.evaluateExpression(binding.condition ?? 'true', binding.sourcePath);
+		let targetContent = '';
+		let shouldRenderHidden = false;
+		if (isTrue) {
+			targetContent = binding.trueContent ?? '';
+		} else if (binding.hasElse) {
+			targetContent = binding.falseContent ?? '';
+		} else {
+			shouldRenderHidden = true;
+			targetContent = binding.trueContent ?? '';
+		}
+		targetContent = this.replaceVariables(targetContent, binding.sourcePath);
+		if (!targetContent.trim()) {
+			this.clearDynamicContainer(element);
+			return;
+		}
+		if (shouldRenderHidden) {
+			this.renderHiddenBlockInto(element, binding.style ?? this.settings.hiddenStyle, targetContent, binding.sourcePath);
+		} else {
+			this.clearDynamicContainer(element);
+			void MarkdownRenderer.renderMarkdown(targetContent, element, binding.sourcePath, this);
+		}
+	}
+
+	private refreshDynamicRenders(changedPath?: string) {
+		this.pruneDynamicRenderElements();
+		for (const element of this.dynamicRenderElements) {
+			const binding = this.dynamicRenderBindings.get(element);
+			if (!binding) continue;
+			if (changedPath && binding.sourcePath !== changedPath) continue;
+			this.refreshDynamicRender(element);
+		}
+	}
+
+	private scheduleDynamicRefresh(changedPath?: string) {
+		if (this.dynamicRefreshTimer) {
+			window.clearTimeout(this.dynamicRefreshTimer);
+		}
+		this.dynamicRefreshTimer = window.setTimeout(() => {
+			this.dynamicRefreshTimer = null;
+			this.refreshDynamicRenders(changedPath);
+		}, 80);
+		window.setTimeout(() => this.refreshDynamicRenders(changedPath), 220);
+		window.setTimeout(() => this.refreshDynamicRenders(changedPath), 500);
 	}
 
 	private renderInputError(codeEl: HTMLElement, message: string) {
@@ -842,6 +960,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 				fm[yamlKey] = newValue;
 			});
 			this.scheduleSyncByPath(binding.sourcePath);
+			this.scheduleDynamicRefresh(binding.sourcePath);
 			return;
 		}
 
@@ -850,7 +969,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		if (targetVar.type !== valueType) return;
 
 		targetVar.value = typeof newValue === 'boolean' ? String(newValue) : String(newValue);
-		await this.saveSettings({ refreshViews: false });
+		await this.saveSettings({ refreshViews: false, refreshDynamic: true });
 		this.syncAllInputs(undefined, { skipActiveTextInputs: true });
 	}
 
@@ -950,21 +1069,23 @@ export default class ConditionalRenderPlugin extends Plugin {
 		inputs.forEach((inputEl) => this.syncSingleInput(inputEl, changedPath, options));
 	}
 
-	private requestDebouncedRefresh() {
+	private requestDebouncedRefresh(sourcePath?: string) {
 		if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
 		this.refreshTimer = window.setTimeout(() => {
 			this.refreshTimer = null;
-			this.refreshActiveViewsPreserveScroll();
+			this.refreshActiveViewsPreserveScroll(sourcePath);
 		}, 250);
 	}
 
-	private refreshActiveViewsPreserveScroll() {
+	private refreshActiveViewsPreserveScroll(sourcePath?: string) {
 		this.app.workspace.getLeavesOfType('markdown').forEach((leaf) => {
 			if (!(leaf.view instanceof MarkdownView)) return;
+			const filePath = leaf.view.file?.path;
+			if (sourcePath && filePath !== sourcePath) return;
 
 			const previewEl = leaf.view.containerEl.querySelector<HTMLElement>('.markdown-preview-view');
 			const scrollTop = previewEl?.scrollTop ?? null;
-			leaf.view.previewMode.rerender(true);
+			leaf.view.previewMode.rerender(false);
 			if (previewEl && scrollTop !== null) {
 				window.requestAnimationFrame(() => {
 					previewEl.scrollTop = scrollTop;
@@ -980,9 +1101,12 @@ export default class ConditionalRenderPlugin extends Plugin {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 	}
 
-	async saveSettings(options: { refreshViews?: boolean } = {}) {
+	async saveSettings(options: { refreshViews?: boolean; refreshDynamic?: boolean; changedPath?: string } = {}) {
 		await this.saveData(this.settings);
 		this.syncAllInputs(undefined, { skipActiveTextInputs: true });
+		if (options.refreshDynamic !== false) {
+			this.scheduleDynamicRefresh(options.changedPath);
+		}
 		if (options.refreshViews) this.requestDebouncedRefresh();
 	}
 
@@ -1054,7 +1178,7 @@ class CRSettingTab extends PluginSettingTab {
 					}
 					text.inputEl.parentElement?.removeClass('cr-error-input');
 					this.plugin.settings.identifier = val;
-					await this.plugin.saveSettings({ refreshViews: true });
+					await this.plugin.saveSettings({ refreshViews: true, refreshDynamic: true });
 				});
 			});
 
@@ -1076,7 +1200,7 @@ class CRSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.hiddenStyle)
 					.onChange(async (value: CRHiddenStyle) => {
 						this.plugin.settings.hiddenStyle = value;
-						await this.plugin.saveSettings({ refreshViews: true });
+						await this.plugin.saveSettings({ refreshViews: true, refreshDynamic: true });
 						this.display();
 					});
 			});
@@ -1088,7 +1212,7 @@ class CRSettingTab extends PluginSettingTab {
 				.addTextArea((text) => {
 					text.setValue(this.plugin.settings.hiddenCustomText).onChange(async (value) => {
 						this.plugin.settings.hiddenCustomText = value;
-						await this.plugin.saveSettings({ refreshViews: true });
+						await this.plugin.saveSettings({ refreshViews: true, refreshDynamic: true });
 					});
 					text.inputEl.style.width = '100%';
 					text.inputEl.style.minHeight = '80px';
@@ -1136,7 +1260,7 @@ class CRSettingTab extends PluginSettingTab {
 					type: 'string',
 					value: '',
 				});
-				await this.plugin.saveSettings();
+				await this.plugin.saveSettings({ refreshDynamic: true });
 				this.display();
 			}),
 		);
@@ -1160,7 +1284,7 @@ class CRSettingTab extends PluginSettingTab {
 				if (draggedIndex < 0 || draggedIndex === index) return;
 				const [item] = this.plugin.settings.variables.splice(draggedIndex, 1);
 				this.plugin.settings.variables.splice(index, 0, item);
-				await this.plugin.saveSettings();
+				await this.plugin.saveSettings({ refreshDynamic: true });
 				this.display();
 			});
 			variableRow.settingEl.addEventListener('dragend', () => {
@@ -1187,7 +1311,7 @@ class CRSettingTab extends PluginSettingTab {
 					}
 					text.inputEl.parentElement?.removeClass('cr-error-input');
 					variable.name = trimmed;
-					await this.plugin.saveSettings();
+					await this.plugin.saveSettings({ refreshDynamic: true });
 				});
 			});
 
@@ -1203,7 +1327,7 @@ class CRSettingTab extends PluginSettingTab {
 						if (value === 'boolean') variable.value = 'true';
 						else if (value === 'number') variable.value = '0';
 						else variable.value = '';
-						await this.plugin.saveSettings();
+						await this.plugin.saveSettings({ refreshDynamic: true });
 						this.display();
 					});
 			});
@@ -1213,12 +1337,12 @@ class CRSettingTab extends PluginSettingTab {
 			if (variable.type === 'boolean') {
 				new ToggleComponent(valueWrapper).setValue(variable.value === 'true').onChange(async (value) => {
 					variable.value = String(value);
-					await this.plugin.saveSettings();
+					await this.plugin.saveSettings({ refreshDynamic: true });
 				});
 			} else {
 				new TextComponent(valueWrapper).setPlaceholder(t('placeholder_value')).setValue(variable.value).onChange(async (value) => {
 					variable.value = value;
-					await this.plugin.saveSettings();
+					await this.plugin.saveSettings({ refreshDynamic: true });
 				});
 			}
 
@@ -1232,7 +1356,7 @@ class CRSettingTab extends PluginSettingTab {
 				variableRow.addExtraButton((button) =>
 					button.setIcon('star').setTooltip(t('tooltip_set_default')).onClick(async () => {
 						this.plugin.settings.defaultVariable = variable.name;
-						await this.plugin.saveSettings({ refreshViews: true });
+						await this.plugin.saveSettings({ refreshDynamic: true });
 						this.display();
 					}),
 				);
@@ -1244,7 +1368,7 @@ class CRSettingTab extends PluginSettingTab {
 					if (this.plugin.settings.defaultVariable === variable.name) {
 						this.plugin.settings.defaultVariable = this.plugin.settings.variables[0]?.name ?? '';
 					}
-					await this.plugin.saveSettings({ refreshViews: true });
+					await this.plugin.saveSettings({ refreshDynamic: true });
 					this.display();
 				}),
 			);
@@ -1281,7 +1405,7 @@ class CRSettingTab extends PluginSettingTab {
 					throw new Error('Invalid shape');
 				}
 				this.plugin.settings.variables = parsed;
-				await this.plugin.saveSettings();
+				await this.plugin.saveSettings({ refreshDynamic: true });
 				new Notice(t('import_success'));
 				this.display();
 			} catch {
