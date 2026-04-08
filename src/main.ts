@@ -202,8 +202,11 @@ export default class ConditionalRenderPlugin extends Plugin {
 		this.registerEvent(
 			this.app.metadataCache.on('changed', (file) => {
 				this.scheduleSyncByPath(file.path);
-				this.didFrontmatterChange(file.path);
+				const frontmatterChanged = this.didFrontmatterChange(file.path);
 				this.scheduleDynamicRefresh(file.path);
+				if (frontmatterChanged) {
+					this.requestDebouncedRefresh(file.path);
+				}
 			}),
 		);
 
@@ -1365,6 +1368,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			});
 			this.scheduleSyncByPath(binding.sourcePath);
 			this.scheduleDynamicRefresh(binding.sourcePath);
+			this.requestDebouncedRefresh(binding.sourcePath);
 			return;
 		}
 
@@ -1586,8 +1590,11 @@ export default class ConditionalRenderPlugin extends Plugin {
 		this.syncAllInputs(undefined, { skipActiveTextInputs: true });
 		if (options.refreshDynamic !== false) {
 			this.scheduleDynamicRefresh(options.changedPath);
+			if (!options.changedPath) {
+				this.requestDebouncedRefresh();
+			}
 		}
-		if (options.refreshViews) this.requestDebouncedRefresh();
+		if (options.refreshViews) this.requestDebouncedRefresh(options.changedPath);
 	}
 
 	buildContext(): Record<string, unknown> {
