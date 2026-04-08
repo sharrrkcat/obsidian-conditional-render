@@ -50,6 +50,8 @@ done: false
 学会了：`cr-input: bool(this.done)`
 ```
 
+![demo](./assets/demo1-zh-CN.gif)
+
 ## 全局变量
 
 全局变量在插件设置中管理。

@@ -45,9 +45,11 @@ If the default variable is false, `cr "this text will be hidden,"` and some text
 You can choose multiple hidden styles, for example `cr-sp "only shown when hovering"`
 
 This document `cr: this.published ? "has been published" : "has not been published yet"`.
-The hero's current life is: `cr-input: number(this.score, min=0, max=100, step=1)`
+The hero's current life is: `cr-input: number(this.HP, min=0, max=100, step=1)`
 Learned: `cr-input: bool(this.done)`
 ```
+
+![demo](./assets/demo1-en.gif)
 
 ## Global Variables
 
