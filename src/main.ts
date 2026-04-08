@@ -198,7 +198,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 		this.addSettingTab(new CRSettingTab(this.app, this));
-		console.log(t('log_loaded').replace('0.12.0', '0.15.5'));
+		console.log(t('log_loaded').replace('0.12.0', '0.15.6'));
 
 		this.registerProcessors();
 
@@ -1218,6 +1218,13 @@ export default class ConditionalRenderPlugin extends Plugin {
 		buttonEl.style.cursor = 'pointer';
 	}
 
+	private hasExplicitNumberControls(controlEl: CRControlElement): boolean {
+		const options = this.getInputOptions(controlEl);
+		return Object.prototype.hasOwnProperty.call(options, 'min')
+			|| Object.prototype.hasOwnProperty.call(options, 'max')
+			|| Object.prototype.hasOwnProperty.call(options, 'step');
+	}
+
 	private getNumberConstraints(controlEl: CRControlElement): { min?: number; max?: number; step: number } {
 		const options = this.getInputOptions(controlEl);
 		const min = typeof options.min === 'number' && Number.isFinite(options.min) ? options.min : undefined;
@@ -1601,16 +1608,29 @@ export default class ConditionalRenderPlugin extends Plugin {
 			controlEl.style.resize = '';
 			controlEl.style.verticalAlign = '';
 			if (controlType === 'number') {
-				controlEl.type = 'text';
-				controlEl.dataset.crDisplayType = 'number';
-				controlEl.readOnly = true;
+				if (this.hasExplicitNumberControls(controlEl)) {
+					controlEl.type = 'text';
+					controlEl.dataset.crDisplayType = 'number';
+					controlEl.readOnly = true;
+					controlEl.removeAttribute('min');
+					controlEl.removeAttribute('max');
+					controlEl.removeAttribute('step');
+					controlEl.removeAttribute('inputmode');
+					controlEl.style.width = '72px';
+					controlEl.style.textAlign = 'center';
+					this.ensureNumberStepperControls(controlEl);
+					return;
+				}
+				delete controlEl.dataset.crDisplayType;
+				this.clearNumberStepperControls(controlEl);
+				controlEl.type = 'number';
+				controlEl.readOnly = false;
+				controlEl.inputMode = 'decimal';
 				controlEl.removeAttribute('min');
 				controlEl.removeAttribute('max');
 				controlEl.removeAttribute('step');
-				controlEl.removeAttribute('inputmode');
-				controlEl.style.width = '72px';
-				controlEl.style.textAlign = 'center';
-				this.ensureNumberStepperControls(controlEl);
+				controlEl.style.width = '120px';
+				controlEl.style.textAlign = '';
 				return;
 			}
 			delete controlEl.dataset.crDisplayType;
@@ -1764,7 +1784,7 @@ class CRSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl('h2', { text: t('settings_title').replace('0.12.0', '0.15.1') });
+		containerEl.createEl('h2', { text: t('settings_title').replace('0.12.0', '0.15.6') });
 
 		new Setting(containerEl)
 			.setName(t('plugin_identifier_name'))
