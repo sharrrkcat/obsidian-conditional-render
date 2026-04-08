@@ -1,6 +1,6 @@
 {
   "name": "obsidian-conditional-render",
-  "version": "1.0.0",
+  "version": "0.15.5",
   "description": "",
   "main": "index.js",
   "scripts": {

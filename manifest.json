@@ -1,7 +1,7 @@
 {
 	"id": "conditional-render",
 	"name": "Conditional Render",
-	"version": "0.14.2",
+	"version": "0.15.5",
 	"minAppVersion": "1.0.0",
 	"description": "A vibe-coding lightweight Obsidian plugin for conditional rendering and variable replacement in your notes.",
 	"author": "Sharrrkcat",
