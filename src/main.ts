@@ -122,7 +122,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 		this.addSettingTab(new CRSettingTab(this.app, this));
-		console.log(t('log_loaded').replace('0.12.0', '0.14.0'));
+		console.log(t('log_loaded').replace('0.12.0', '0.14.2'));
 
 		this.registerProcessors();
 
@@ -551,6 +551,10 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 	private renderInteractiveInput(codeEl: HTMLElement, spec: ParsedInputSpec, context: MarkdownPostProcessorContext) {
 		const wrapper = document.createElement('span');
+		wrapper.style.display = 'inline-flex';
+		wrapper.style.alignItems = 'center';
+		wrapper.style.gap = '4px';
+
 		const inputEl = document.createElement('input');
 		inputEl.className = 'cr-interactive-input';
 		wrapper.appendChild(inputEl);
@@ -568,10 +572,129 @@ export default class ConditionalRenderPlugin extends Plugin {
 		this.scheduleSyncForInput(inputEl, { immediate: true, delayed: true });
 	}
 
+	private getInputWrapper(inputEl: HTMLInputElement): HTMLElement | null {
+		return inputEl.parentElement;
+	}
+
+	private ensureNumberStepperControls(inputEl: HTMLInputElement) {
+		const wrapper = this.getInputWrapper(inputEl);
+		if (!wrapper) return;
+
+		wrapper.style.display = 'inline-flex';
+		wrapper.style.alignItems = 'center';
+		wrapper.style.gap = '4px';
+
+		let decrementBtn = wrapper.querySelector<HTMLButtonElement>('[data-cr-stepper="decrement"]');
+		let incrementBtn = wrapper.querySelector<HTMLButtonElement>('[data-cr-stepper="increment"]');
+
+		if (!decrementBtn) {
+			decrementBtn = document.createElement('button');
+			decrementBtn.type = 'button';
+			decrementBtn.dataset.crStepper = 'decrement';
+			decrementBtn.textContent = '-';
+			this.applyStepperButtonStyle(decrementBtn);
+			decrementBtn.addEventListener('click', (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				void this.adjustNumberInput(inputEl, -1);
+			});
+			wrapper.insertBefore(decrementBtn, inputEl);
+		}
+
+		if (!incrementBtn) {
+			incrementBtn = document.createElement('button');
+			incrementBtn.type = 'button';
+			incrementBtn.dataset.crStepper = 'increment';
+			incrementBtn.textContent = '+';
+			this.applyStepperButtonStyle(incrementBtn);
+			incrementBtn.addEventListener('click', (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				void this.adjustNumberInput(inputEl, 1);
+			});
+			wrapper.appendChild(incrementBtn);
+		}
+	}
+
+	private clearNumberStepperControls(inputEl: HTMLInputElement) {
+		const wrapper = this.getInputWrapper(inputEl);
+		if (!wrapper) return;
+		wrapper.querySelectorAll('[data-cr-stepper]').forEach((el) => el.remove());
+	}
+
+	private applyStepperButtonStyle(buttonEl: HTMLButtonElement) {
+		buttonEl.style.display = 'inline-flex';
+		buttonEl.style.alignItems = 'center';
+		buttonEl.style.justifyContent = 'center';
+		buttonEl.style.width = '24px';
+		buttonEl.style.height = '24px';
+		buttonEl.style.padding = '0';
+		buttonEl.style.lineHeight = '1';
+		buttonEl.style.fontSize = '14px';
+		buttonEl.style.border = '1px solid var(--background-modifier-border)';
+		buttonEl.style.borderRadius = 'var(--radius-s)';
+		buttonEl.style.background = 'var(--background-modifier-form-field)';
+		buttonEl.style.color = 'var(--text-normal)';
+		buttonEl.style.cursor = 'pointer';
+	}
+
+	private getNumberConstraints(inputEl: HTMLInputElement): { min?: number; max?: number; step: number } {
+		const options = this.getInputOptions(inputEl);
+		const min = typeof options.min === 'number' && Number.isFinite(options.min) ? options.min : undefined;
+		const max = typeof options.max === 'number' && Number.isFinite(options.max) ? options.max : undefined;
+		const step = typeof options.step === 'number' && Number.isFinite(options.step) && options.step > 0 ? options.step : 1;
+		return { min, max, step };
+	}
+
+	private clampNumberValue(value: number, constraints: { min?: number; max?: number }): number {
+		let next = value;
+		if (typeof constraints.min === 'number' && next < constraints.min) next = constraints.min;
+		if (typeof constraints.max === 'number' && next > constraints.max) next = constraints.max;
+		return next;
+	}
+
+	private updateNumberStepperDisabledState(inputEl: HTMLInputElement, currentValue: number | null) {
+		const wrapper = this.getInputWrapper(inputEl);
+		if (!wrapper) return;
+		const decrementBtn = wrapper.querySelector<HTMLButtonElement>('[data-cr-stepper="decrement"]');
+		const incrementBtn = wrapper.querySelector<HTMLButtonElement>('[data-cr-stepper="increment"]');
+		const { min, max } = this.getNumberConstraints(inputEl);
+
+		if (decrementBtn) {
+			decrementBtn.disabled = currentValue !== null && typeof min === 'number' && currentValue <= min;
+			decrementBtn.style.opacity = decrementBtn.disabled ? '0.5' : '1';
+			decrementBtn.style.cursor = decrementBtn.disabled ? 'not-allowed' : 'pointer';
+		}
+		if (incrementBtn) {
+			incrementBtn.disabled = currentValue !== null && typeof max === 'number' && currentValue >= max;
+			incrementBtn.style.opacity = incrementBtn.disabled ? '0.5' : '1';
+			incrementBtn.style.cursor = incrementBtn.disabled ? 'not-allowed' : 'pointer';
+		}
+	}
+
+	private async adjustNumberInput(inputEl: HTMLInputElement, direction: -1 | 1) {
+		const binding = this.inputBindings.get(inputEl);
+		if (!binding) return;
+
+		const resolved = this.resolveInputBinding(binding);
+		if (!resolved.ok || resolved.valueType !== 'number') return;
+
+		const constraints = this.getNumberConstraints(inputEl);
+		const rawCurrent = resolved.value;
+		const current = typeof rawCurrent === 'number' && Number.isFinite(rawCurrent)
+			? rawCurrent
+			: (typeof constraints.min === 'number' ? constraints.min : 0);
+		const nextValue = this.clampNumberValue(current + direction * constraints.step, constraints);
+
+		inputEl.value = String(nextValue);
+		await this.commitInputValue(inputEl, nextValue);
+		this.updateNumberStepperDisabledState(inputEl, nextValue);
+	}
+
 	private setupInputListeners(inputEl: HTMLInputElement) {
 		inputEl.addEventListener('focus', () => {
 			const state = this.getInputState(inputEl);
-			state.isEditing = true;
+			state.isEditing = inputEl.type !== 'checkbox' && inputEl.dataset.crDisplayType !== 'number';
 		});
 
 		inputEl.addEventListener('blur', () => {
@@ -583,12 +706,14 @@ export default class ConditionalRenderPlugin extends Plugin {
 		});
 
 		inputEl.addEventListener('compositionstart', () => {
+			if (inputEl.dataset.crDisplayType === 'number') return;
 			const state = this.getInputState(inputEl);
 			state.isEditing = true;
 			state.isComposing = true;
 		});
 
 		inputEl.addEventListener('compositionend', () => {
+			if (inputEl.dataset.crDisplayType === 'number') return;
 			const state = this.getInputState(inputEl);
 			state.isComposing = false;
 			if (inputEl.type !== 'checkbox') {
@@ -597,11 +722,12 @@ export default class ConditionalRenderPlugin extends Plugin {
 		});
 
 		inputEl.addEventListener('input', () => {
-			if (inputEl.type === 'checkbox') return;
+			if (inputEl.type === 'checkbox' || inputEl.dataset.crDisplayType === 'number') return;
 			this.scheduleCommit(inputEl);
 		});
 
 		inputEl.addEventListener('change', () => {
+			if (inputEl.dataset.crDisplayType === 'number') return;
 			if (inputEl.type === 'checkbox') {
 				void this.commitInputValue(inputEl);
 			} else {
@@ -611,6 +737,22 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 		inputEl.addEventListener('keydown', (event) => {
 			event.stopPropagation();
+			if (inputEl.dataset.crDisplayType === 'number') {
+				if (event.key === 'ArrowUp') {
+					event.preventDefault();
+					void this.adjustNumberInput(inputEl, 1);
+					return;
+				}
+				if (event.key === 'ArrowDown') {
+					event.preventDefault();
+					void this.adjustNumberInput(inputEl, -1);
+					return;
+				}
+				if (!['Tab', 'Shift', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
+					event.preventDefault();
+				}
+				return;
+			}
 			if (event.key === 'Enter' && inputEl.type !== 'checkbox') {
 				inputEl.blur();
 			}
@@ -630,6 +772,11 @@ export default class ConditionalRenderPlugin extends Plugin {
 	private isTextLikeInput(inputEl: HTMLInputElement) {
 		return inputEl.type === 'text' || inputEl.type === 'number';
 	}
+
+	private getInputOptions(inputEl: HTMLInputElement): Record<string, string | number | boolean> {
+		return this.inputBindings.get(inputEl)?.spec.options ?? {};
+	}
+
 
 	private scheduleCommit(inputEl: HTMLInputElement) {
 		const state = this.getInputState(inputEl);
@@ -658,7 +805,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		return typeof optionValue === 'number' && Number.isFinite(optionValue) && optionValue >= 0 ? optionValue : 250;
 	}
 
-	private async commitInputValue(inputEl: HTMLInputElement) {
+	private async commitInputValue(inputEl: HTMLInputElement, overrideValue?: string | number | boolean) {
 		const binding = this.inputBindings.get(inputEl);
 		if (!binding) return;
 
@@ -668,18 +815,22 @@ export default class ConditionalRenderPlugin extends Plugin {
 		const valueType = resolved.valueType;
 		let newValue: string | number | boolean;
 		if (valueType === 'boolean') {
-			newValue = inputEl.checked;
+			newValue = typeof overrideValue === 'boolean' ? overrideValue : inputEl.checked;
 		} else if (valueType === 'number') {
-			const raw = inputEl.value.trim();
-			if (raw === '') {
-				newValue = '';
+			if (typeof overrideValue === 'number' && Number.isFinite(overrideValue)) {
+				newValue = this.clampNumberValue(overrideValue, this.getNumberConstraints(inputEl));
 			} else {
-				const parsed = Number(raw);
-				if (Number.isNaN(parsed)) return;
-				newValue = parsed;
+				const parsed = Number(inputEl.value);
+				if (!Number.isFinite(parsed)) {
+					this.scheduleSyncForInput(inputEl, { immediate: false, delayed: true });
+					return;
+				}
+				newValue = this.clampNumberValue(parsed, this.getNumberConstraints(inputEl));
 			}
+			inputEl.value = String(newValue);
+			this.updateNumberStepperDisabledState(inputEl, newValue);
 		} else {
-			newValue = inputEl.value;
+			newValue = typeof overrideValue === 'string' ? overrideValue : inputEl.value;
 		}
 
 		if (binding.spec.targetKind === 'yaml') {
@@ -745,11 +896,11 @@ export default class ConditionalRenderPlugin extends Plugin {
 		}
 
 		const { valueType, value, options: inputOptions } = resolved;
-		const desiredType = valueType === 'boolean' ? 'checkbox' : valueType === 'number' ? 'number' : 'text';
+		const desiredType = valueType === 'boolean' ? 'checkbox' : 'text';
 		if (inputEl.type !== desiredType) inputEl.type = desiredType;
 		this.applyInputOptions(inputEl, valueType, inputOptions);
 
-		if (desiredType === 'checkbox') {
+		if (valueType === 'boolean') {
 			const checked = !!value;
 			if (inputEl.checked !== checked) inputEl.checked = checked;
 			return;
@@ -757,6 +908,10 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 		const nextValue = value === undefined || value === null ? '' : String(value);
 		if (inputEl.value !== nextValue) inputEl.value = nextValue;
+		if (valueType === 'number') {
+			const numericValue = nextValue === '' ? null : Number(nextValue);
+			this.updateNumberStepperDisabledState(inputEl, Number.isFinite(numericValue as number) ? (numericValue as number) : null);
+		}
 	}
 
 	private applyInputOptions(
@@ -768,13 +923,25 @@ export default class ConditionalRenderPlugin extends Plugin {
 		inputEl.placeholder = typeof placeholder === 'string' ? placeholder : '';
 
 		if (valueType === 'number') {
-			inputEl.min = typeof options.min === 'number' ? String(options.min) : '';
-			inputEl.max = typeof options.max === 'number' ? String(options.max) : '';
-			inputEl.step = typeof options.step === 'number' ? String(options.step) : '';
-		} else {
+			inputEl.dataset.crDisplayType = 'number';
+			inputEl.readOnly = true;
 			inputEl.removeAttribute('min');
 			inputEl.removeAttribute('max');
 			inputEl.removeAttribute('step');
+			inputEl.removeAttribute('inputmode');
+			inputEl.style.width = '72px';
+			inputEl.style.textAlign = 'center';
+			this.ensureNumberStepperControls(inputEl);
+		} else {
+			delete inputEl.dataset.crDisplayType;
+			inputEl.readOnly = false;
+			inputEl.removeAttribute('min');
+			inputEl.removeAttribute('max');
+			inputEl.removeAttribute('step');
+			inputEl.removeAttribute('inputmode');
+			inputEl.style.textAlign = '';
+			inputEl.style.width = valueType === 'boolean' ? '' : '120px';
+			this.clearNumberStepperControls(inputEl);
 		}
 	}
 
@@ -873,7 +1040,7 @@ class CRSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl('h2', { text: t('settings_title').replace('0.12.0', '0.14.0') });
+		containerEl.createEl('h2', { text: t('settings_title').replace('0.12.0', '0.14.2') });
 
 		new Setting(containerEl)
 			.setName(t('plugin_identifier_name'))
@@ -957,13 +1124,6 @@ class CRSettingTab extends PluginSettingTab {
 			<div class="cr-legend-item"><code>${getName('spoiler', 'sp')}</code> <span class="cr-hidden-spoiler" title="${exText}">${exText}</span></div>
 			<div class="cr-legend-item"><code>${getName('spoiler-round', 'spr')}</code> <span class="cr-hidden-spoiler-round" title="${exText}">${exText}</span></div>
 		`;
-
-		containerEl.createEl('p', {
-			text: 'Typed input syntax: cr-input: bool(name) / string(name, placeholder="text") / number(this.score, min=0, max=100, step=1)',
-		});
-		containerEl.createEl('p', {
-			text: 'Legacy input syntax is still supported: cr-input name / cr-input this.status',
-		});
 
 		const variablesHeader = new Setting(containerEl)
 			.setName(t('variables_header_name'))
