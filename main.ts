@@ -5,7 +5,6 @@ import {
 	Setting,
 	MarkdownRenderer,
 	setIcon,
-	MarkdownView,
 	ToggleComponent,
 	TextComponent,
 	TextAreaComponent,
@@ -44,11 +43,12 @@ interface ConditionalRenderSettings {
 
 interface SyncOptions {
 	force?: boolean;
+	skipDirtyTextInput?: boolean;
 }
 
-const PLUGIN_VERSION = '0.13.1';
+const PLUGIN_VERSION = '0.13.4';
 const INPUT_COMMIT_DELAY = 180;
-const FRONTMATTER_SYNC_DELAYS = [0, 60, 220] as const;
+const FRONTMATTER_SYNC_DELAYS = [0, 50, 150, 350, 800] as const;
 const SUPPORTED_STYLES: CRHiddenStyle[] = [
 	'none',
 	'text',
@@ -137,16 +137,16 @@ class CRInputChild extends MarkdownRenderChild {
 	}
 
 	onload() {
-		this.plugin.syncSingleInput(this.inputEl, undefined, { force: true });
+		this.plugin.scheduleSingleInputSync(this.inputEl);
 	}
 }
 
 export default class ConditionalRenderPlugin extends Plugin {
 	settings: ConditionalRenderSettings;
 
-	private refreshTimer: number | null = null;
-	private refreshTargetPath: string | null = null;
 	private inputCommitTimers = new WeakMap<HTMLInputElement, number>();
+	private inputDirtyState = new WeakMap<HTMLInputElement, boolean>();
+	private inputComposingState = new WeakMap<HTMLInputElement, boolean>();
 	private pendingFileSyncTimers = new Map<string, number[]>();
 
 	async onload() {
@@ -161,13 +161,16 @@ export default class ConditionalRenderPlugin extends Plugin {
 				this.handleMetadataChanged(file.path);
 			}),
 		);
+		this.registerEvent(
+			this.app.vault.on('modify', (file) => {
+				if (file instanceof TFile && file.extension === 'md') {
+					this.handleVaultModified(file.path);
+				}
+			}),
+		);
 	}
 
 	onunload() {
-		if (this.refreshTimer !== null) {
-			window.clearTimeout(this.refreshTimer);
-			this.refreshTimer = null;
-		}
 
 		for (const timers of this.pendingFileSyncTimers.values()) {
 			timers.forEach((timerId) => window.clearTimeout(timerId));
@@ -178,7 +181,32 @@ export default class ConditionalRenderPlugin extends Plugin {
 	}
 
 	private handleMetadataChanged(path: string) {
+		this.syncAllInputs(path, { skipDirtyTextInput: true });
 		this.scheduleInputSync(path);
+	}
+
+	private handleVaultModified(path: string) {
+		this.scheduleInputSync(path);
+	}
+
+	private setInputDirty(inputEl: HTMLInputElement, isDirty: boolean) {
+		this.inputDirtyState.set(inputEl, isDirty);
+	}
+
+	private isInputDirty(inputEl: HTMLInputElement): boolean {
+		return this.inputDirtyState.get(inputEl) === true;
+	}
+
+	private setInputComposing(inputEl: HTMLInputElement, isComposing: boolean) {
+		this.inputComposingState.set(inputEl, isComposing);
+	}
+
+	private isInputComposing(inputEl: HTMLInputElement): boolean {
+		return this.inputComposingState.get(inputEl) === true;
+	}
+
+	private isTextLikeInput(inputEl: HTMLInputElement): boolean {
+		return inputEl.type !== 'checkbox';
 	}
 
 	private scheduleInputSync(path: string) {
@@ -191,7 +219,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		for (const delay of FRONTMATTER_SYNC_DELAYS) {
 			let timerId = 0;
 			timerId = window.setTimeout(() => {
-				this.syncAllInputs(path, { force: true });
+				this.syncAllInputs(path, { skipDirtyTextInput: true });
 
 				const current = this.pendingFileSyncTimers.get(path);
 				if (!current) return;
@@ -203,6 +231,15 @@ export default class ConditionalRenderPlugin extends Plugin {
 		}
 
 		this.pendingFileSyncTimers.set(path, timers);
+	}
+	scheduleSingleInputSync(inputEl: HTMLInputElement) {
+		for (const delay of FRONTMATTER_SYNC_DELAYS) {
+			window.setTimeout(() => {
+				if (inputEl.isConnected) {
+					this.syncSingleInput(inputEl, undefined, { skipDirtyTextInput: true });
+				}
+			}, delay);
+		}
 	}
 
 	getDefaultVariable(): string {
@@ -399,38 +436,50 @@ export default class ConditionalRenderPlugin extends Plugin {
 		span.appendChild(inputEl);
 		codeEl.replaceWith(span);
 
+		this.setInputDirty(inputEl, false);
+		this.setInputComposing(inputEl, false);
 		this.setupInputListeners(inputEl, cleanVarName, sourcePath);
 
 		const child = new CRInputChild(span, inputEl, this);
 		context.addChild(child);
 
-		this.syncSingleInput(inputEl, undefined, { force: true });
+		this.scheduleSingleInputSync(inputEl);
 	}
 
-	private commitInputChange(inputEl: HTMLInputElement, varName: string, sourcePath: string) {
+	private async commitInputChange(inputEl: HTMLInputElement, varName: string, sourcePath: string) {
 		const isYaml = varName.startsWith('this.');
 		const parsed = this.readTypedInputValue(inputEl);
 		if (parsed === undefined) return;
 
-		void (async () => {
-			if (isYaml) {
-				const yamlKey = varName.substring(5).trim();
-				const file = this.app.vault.getAbstractFileByPath(sourcePath);
-				if (!(file instanceof TFile)) return;
+		if (isYaml) {
+			const yamlKey = varName.substring(5).trim();
+			const file = this.app.vault.getAbstractFileByPath(sourcePath);
+			if (!(file instanceof TFile)) return;
 
-				await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-					frontmatter[yamlKey] = parsed;
-				});
-				this.requestDebouncedRefresh(sourcePath);
+			const currentValue = this.getFrontmatter(sourcePath)[yamlKey];
+			if (currentValue === parsed) {
+				this.scheduleInputSync(sourcePath);
 				return;
 			}
 
-			const globalVar = this.settings.variables.find((variable) => variable.name === varName);
-			if (!globalVar) return;
+			await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
+				frontmatter[yamlKey] = parsed;
+			});
+			this.scheduleInputSync(sourcePath);
+			return;
+		}
 
-			globalVar.value = String(parsed);
-			await this.saveSettings({ refreshMode: 'debounced' });
-		})();
+		const globalVar = this.settings.variables.find((variable) => variable.name === varName);
+		if (!globalVar) return;
+
+		const nextValue = String(parsed);
+		if (globalVar.value === nextValue) {
+			this.syncAllInputs(undefined, { skipDirtyTextInput: true });
+			return;
+		}
+
+		globalVar.value = nextValue;
+		await this.saveSettings();
 	}
 
 	private scheduleInputCommit(inputEl: HTMLInputElement, varName: string, sourcePath: string) {
@@ -441,37 +490,67 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 		const timer = window.setTimeout(() => {
 			this.inputCommitTimers.delete(inputEl);
-			this.commitInputChange(inputEl, varName, sourcePath);
+			void this.commitInputChange(inputEl, varName, sourcePath);
 		}, INPUT_COMMIT_DELAY);
 		this.inputCommitTimers.set(inputEl, timer);
 	}
 
-	private flushPendingInputCommit(inputEl: HTMLInputElement, varName: string, sourcePath: string) {
+	private async flushPendingInputCommit(inputEl: HTMLInputElement, varName: string, sourcePath: string) {
 		const existingTimer = this.inputCommitTimers.get(inputEl);
 		if (existingTimer !== undefined) {
 			window.clearTimeout(existingTimer);
 			this.inputCommitTimers.delete(inputEl);
 		}
-		this.commitInputChange(inputEl, varName, sourcePath);
+		await this.commitInputChange(inputEl, varName, sourcePath);
 	}
 
 	setupInputListeners(inputEl: HTMLInputElement, cleanVarName: string, sourcePath: string) {
+		inputEl.addEventListener('compositionstart', () => {
+			this.setInputComposing(inputEl, true);
+			this.setInputDirty(inputEl, true);
+		});
+
+		inputEl.addEventListener('compositionend', () => {
+			this.setInputComposing(inputEl, false);
+			if (this.isTextLikeInput(inputEl)) {
+				this.setInputDirty(inputEl, true);
+				this.scheduleInputCommit(inputEl, cleanVarName, sourcePath);
+			}
+		});
+
 		inputEl.addEventListener('input', () => {
 			if (inputEl.type === 'checkbox') return;
-			this.scheduleInputCommit(inputEl, cleanVarName, sourcePath);
+			this.setInputDirty(inputEl, true);
+			if (!this.isInputComposing(inputEl)) {
+				this.scheduleInputCommit(inputEl, cleanVarName, sourcePath);
+			}
 		});
 
 		inputEl.addEventListener('change', () => {
 			if (inputEl.type === 'checkbox') {
-				this.flushPendingInputCommit(inputEl, cleanVarName, sourcePath);
+				void this.flushPendingInputCommit(inputEl, cleanVarName, sourcePath);
 				return;
 			}
-			this.scheduleInputCommit(inputEl, cleanVarName, sourcePath);
+			this.setInputDirty(inputEl, true);
+			if (!this.isInputComposing(inputEl)) {
+				this.scheduleInputCommit(inputEl, cleanVarName, sourcePath);
+			}
 		});
 
 		inputEl.addEventListener('blur', () => {
-			this.flushPendingInputCommit(inputEl, cleanVarName, sourcePath);
-			this.syncSingleInput(inputEl, undefined, { force: true });
+			void (async () => {
+				this.setInputComposing(inputEl, false);
+				await this.flushPendingInputCommit(inputEl, cleanVarName, sourcePath);
+				this.setInputDirty(inputEl, false);
+				this.scheduleSingleInputSync(inputEl);
+			})();
+		});
+
+		inputEl.addEventListener('focus', () => {
+			this.setInputComposing(inputEl, false);
+			if (this.isTextLikeInput(inputEl)) {
+				this.setInputDirty(inputEl, false);
+			}
 		});
 
 		inputEl.addEventListener('keyup', (event) => {
@@ -502,7 +581,17 @@ export default class ConditionalRenderPlugin extends Plugin {
 			return;
 		}
 
-		if (!options.force && document.activeElement === inputEl) {
+		const isActive = document.activeElement === inputEl;
+		const shouldProtectDirtyText =
+			options.skipDirtyTextInput === true &&
+			this.isTextLikeInput(inputEl) &&
+			(isActive || this.isInputDirty(inputEl) || this.isInputComposing(inputEl));
+
+		if (shouldProtectDirtyText) {
+			return;
+		}
+
+		if (!options.force && isActive) {
 			return;
 		}
 
@@ -542,6 +631,9 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 		const strVal = newValue !== undefined && newValue !== null ? String(newValue) : '';
 		if (inputEl.value !== strVal) inputEl.value = strVal;
+		if (document.activeElement !== inputEl) {
+			this.setInputDirty(inputEl, false);
+		}
 	}
 
 	syncAllInputs(changedPath?: string, options: SyncOptions = {}) {
@@ -549,19 +641,6 @@ export default class ConditionalRenderPlugin extends Plugin {
 		inputs.forEach((inputEl) => this.syncSingleInput(inputEl, changedPath, options));
 	}
 
-	requestDebouncedRefresh(targetPath?: string) {
-		if (targetPath) this.refreshTargetPath = targetPath;
-		if (this.refreshTimer !== null) window.clearTimeout(this.refreshTimer);
-
-		this.refreshTimer = window.setTimeout(() => {
-			const path = this.refreshTargetPath;
-			this.refreshTargetPath = null;
-			this.refreshTimer = null;
-
-			if (path) this.refreshFileViews(path);
-			else this.refreshActiveViews();
-		}, 250);
-	}
 
 	async loadSettings() {
 		const loaded = await this.loadData();
@@ -580,52 +659,11 @@ export default class ConditionalRenderPlugin extends Plugin {
 		}
 	}
 
-	async saveSettings(options: { refreshMode?: 'none' | 'immediate' | 'debounced' } = {}) {
-		const refreshMode = options.refreshMode ?? 'none';
+	async saveSettings() {
 		await this.saveData(this.settings);
-		this.syncAllInputs(undefined, { force: true });
-
-		if (refreshMode === 'immediate') this.refreshActiveViews();
-		else if (refreshMode === 'debounced') this.requestDebouncedRefresh();
+		this.syncAllInputs(undefined, { skipDirtyTextInput: true });
 	}
 
-	refreshActiveViews() {
-		this.app.workspace.getLeavesOfType('markdown').forEach((leaf) => {
-			if (leaf.view instanceof MarkdownView) {
-				this.safeRerenderView(leaf.view);
-			}
-		});
-	}
-
-	private refreshFileViews(path: string) {
-		this.app.workspace.getLeavesOfType('markdown').forEach((leaf) => {
-			if (leaf.view instanceof MarkdownView && leaf.view.file?.path === path) {
-				this.safeRerenderView(leaf.view);
-			}
-		});
-	}
-
-	private safeRerenderView(view: MarkdownView) {
-		const previewMode = view.previewMode as {
-			rerender?: (full?: boolean) => void;
-			getScroll?: () => number;
-			applyScroll?: (scroll: number) => void;
-		};
-		const editor = view.editor;
-		const editorScroll = typeof editor?.getScrollInfo === 'function' ? editor.getScrollInfo() : null;
-		const previewScroll = typeof previewMode.getScroll === 'function' ? previewMode.getScroll() : null;
-
-		previewMode.rerender?.(true);
-
-		window.requestAnimationFrame(() => {
-			if (editorScroll && typeof editor?.scrollTo === 'function') {
-				editor.scrollTo(editorScroll.left, editorScroll.top);
-			}
-			if (previewScroll !== null && typeof previewMode.applyScroll === 'function') {
-				previewMode.applyScroll(previewScroll);
-			}
-		});
-	}
 
 	buildContext(): Record<string, string | number | boolean> {
 		const ctx: Record<string, string | number | boolean> = {};
@@ -718,7 +756,7 @@ class CRSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.hiddenStyle)
 					.onChange(async (value: CRHiddenStyle) => {
 						this.plugin.settings.hiddenStyle = value;
-						await this.plugin.saveSettings({ refreshMode: 'debounced' });
+						await this.plugin.saveSettings();
 						this.display();
 					});
 			});
@@ -732,7 +770,7 @@ class CRSettingTab extends PluginSettingTab {
 						.setValue(this.plugin.settings.hiddenCustomText)
 						.onChange(async (value) => {
 							this.plugin.settings.hiddenCustomText = value;
-							await this.plugin.saveSettings({ refreshMode: 'debounced' });
+							await this.plugin.saveSettings();
 						});
 					text.inputEl.style.width = '100%';
 					text.inputEl.style.minHeight = '80px';
@@ -844,7 +882,7 @@ class CRSettingTab extends PluginSettingTab {
 						if (invalid) return;
 
 						variable.name = nextValue;
-						await this.plugin.saveSettings({ refreshMode: 'debounced' });
+						await this.plugin.saveSettings();
 					});
 			});
 
@@ -860,7 +898,7 @@ class CRSettingTab extends PluginSettingTab {
 						if (value === 'boolean') variable.value = 'true';
 						else if (value === 'number') variable.value = '0';
 						else variable.value = '';
-						await this.plugin.saveSettings({ refreshMode: 'debounced' });
+						await this.plugin.saveSettings();
 						this.display();
 					});
 			});
@@ -873,7 +911,7 @@ class CRSettingTab extends PluginSettingTab {
 					.setValue(variable.value === 'true')
 					.onChange(async (value) => {
 						variable.value = String(value);
-						await this.plugin.saveSettings({ refreshMode: 'debounced' });
+						await this.plugin.saveSettings();
 					});
 			} else {
 				new TextComponent(valueWrapper)
@@ -883,7 +921,7 @@ class CRSettingTab extends PluginSettingTab {
 						variable.value = variable.type === 'number' && value.trim() !== '' && Number.isFinite(Number(value))
 							? String(Number(value))
 							: value;
-						await this.plugin.saveSettings({ refreshMode: 'debounced' });
+						await this.plugin.saveSettings();
 					});
 			}
 
@@ -901,7 +939,7 @@ class CRSettingTab extends PluginSettingTab {
 						.setTooltip(t('tooltip_set_default'))
 						.onClick(async () => {
 							this.plugin.settings.defaultVariable = variable.name;
-							await this.plugin.saveSettings({ refreshMode: 'debounced' });
+							await this.plugin.saveSettings();
 							this.display();
 						}),
 				);
@@ -916,7 +954,7 @@ class CRSettingTab extends PluginSettingTab {
 						if (this.plugin.settings.defaultVariable === variable.name) {
 							this.plugin.settings.defaultVariable = this.plugin.settings.variables[0]?.name ?? '';
 						}
-						await this.plugin.saveSettings({ refreshMode: 'debounced' });
+						await this.plugin.saveSettings();
 						this.display();
 					}),
 			);
@@ -971,7 +1009,7 @@ class CRSettingTab extends PluginSettingTab {
 					this.plugin.settings.defaultVariable = variables[0].name;
 				}
 
-				await this.plugin.saveSettings({ refreshMode: 'debounced' });
+				await this.plugin.saveSettings();
 				new Notice(t('import_success'));
 				this.display();
 			} catch {
