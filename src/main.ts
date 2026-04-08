@@ -13,6 +13,7 @@ import {
 	TextComponent,
 	ToggleComponent,
 	setIcon,
+	moment,
 } from 'obsidian';
 import { t } from './i18n';
 
@@ -41,7 +42,7 @@ export type CRHiddenStyle =
 	| 'spoiler-white-round';
 
 type CRInputValueType = 'string' | 'number' | 'boolean';
-type CRInputControlType = 'string' | 'number' | 'boolean' | 'textarea' | 'select';
+type CRInputControlType = 'string' | 'number' | 'boolean' | 'textarea' | 'select' | 'calendar';
 type CRInputOptionValue = string | number | boolean | string[];
 type CRControlElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
 type CRInputSyntaxMode = 'typed' | 'legacy';
@@ -142,6 +143,7 @@ const INPUT_TYPE_ALIASES: Record<string, CRInputControlType> = {
 	number: 'number',
 	textarea: 'textarea',
 	select: 'select',
+	calendar: 'calendar',
 };
 
 const isValidVarName = (name: string) => /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(name);
@@ -722,7 +724,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		if (!typedMatch) {
 			return {
 				ok: false,
-				message: 'Invalid typed syntax. Use cr-input: bool(name) / string(name) / number(this.score) / textarea(note) / select(status, options=["a","b"])',
+				message: 'Invalid typed syntax. Use cr-input: bool(name) / string(name) / number(this.score) / textarea(note) / select(status, options=["a","b"]) / calendar(date, format="YYYY-MM-DD")',
 			};
 		}
 
@@ -731,7 +733,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		if (!explicitControlType) {
 			return {
 				ok: false,
-				message: `Unsupported input type "${rawType}". Allowed: bool, string, number, textarea, select`,
+				message: `Unsupported input type "${rawType}". Allowed: bool, string, number, textarea, select, calendar`,
 			};
 		}
 
@@ -767,6 +769,13 @@ export default class ConditionalRenderPlugin extends Plugin {
 			const normalized = this.normalizeSelectOptions(options.options);
 			if (!normalized || normalized.length === 0) {
 				return { ok: false, message: 'select(...) requires options=["option1","option2"]' };
+			}
+		}
+
+		if (explicitControlType === 'calendar') {
+			const format = this.getCalendarFormat(options);
+			if (!format) {
+				return { ok: false, message: 'calendar(...) requires a valid format string' };
 			}
 		}
 
@@ -862,6 +871,33 @@ export default class ConditionalRenderPlugin extends Plugin {
 		if (!Array.isArray(value)) return null;
 		const normalized = value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean);
 		return normalized.length > 0 ? normalized : null;
+	}
+
+	private getCalendarFormat(options: Record<string, CRInputOptionValue>): string {
+		const format = options.format;
+		return typeof format === 'string' && format.trim() ? format.trim() : 'YYYY-MM-DD';
+	}
+
+	private toCalendarInputValue(storedValue: unknown, format: string): string {
+		if (storedValue === undefined || storedValue === null || storedValue === '') return '';
+		const text = String(storedValue).trim();
+		if (!text) return '';
+
+		const strict = moment(text, format, true);
+		if (strict.isValid()) return strict.format('YYYY-MM-DD');
+
+		const iso = moment(text, 'YYYY-MM-DD', true);
+		if (iso.isValid()) return iso.format('YYYY-MM-DD');
+
+		return '';
+	}
+
+	private fromCalendarInputValue(inputValue: string, format: string): string | null {
+		const text = inputValue.trim();
+		if (!text) return '';
+		const parsed = moment(text, 'YYYY-MM-DD', true);
+		if (!parsed.isValid()) return null;
+		return parsed.format(format);
 	}
 
 	private getExplicitValueType(controlType: CRInputControlType): CRInputValueType {
@@ -1152,7 +1188,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 				void this.commitInputValue(controlEl);
 				return;
 			}
-			if (this.isInputElement(controlEl) && controlEl.type === 'checkbox') {
+			if (this.isInputElement(controlEl) && (controlEl.type === 'checkbox' || controlEl.dataset.crDisplayType === 'calendar')) {
 				void this.commitInputValue(controlEl);
 				return;
 			}
@@ -1293,7 +1329,17 @@ export default class ConditionalRenderPlugin extends Plugin {
 			this.setControlValue(controlEl, String(newValue));
 			this.updateNumberStepperDisabledState(controlEl, newValue);
 		} else {
-			newValue = typeof overrideValue === 'string' ? overrideValue : this.getControlValue(controlEl);
+			if (this.isInputElement(controlEl) && controlEl.dataset.crDisplayType === 'calendar') {
+				const format = this.getCalendarFormat(resolved.options);
+				const formatted = this.fromCalendarInputValue(typeof overrideValue === 'string' ? overrideValue : this.getControlValue(controlEl), format);
+				if (formatted === null) {
+					this.scheduleSyncForInput(controlEl, { immediate: false, delayed: true });
+					return;
+				}
+				newValue = formatted;
+			} else {
+				newValue = typeof overrideValue === 'string' ? overrideValue : this.getControlValue(controlEl);
+			}
 		}
 
 		if (binding.spec.targetKind === 'yaml') {
@@ -1373,6 +1419,12 @@ export default class ConditionalRenderPlugin extends Plugin {
 			return;
 		}
 
+		if (this.isInputElement(controlEl) && controlEl.dataset.crDisplayType === 'calendar') {
+			const calendarValue = this.toCalendarInputValue(nextValue, this.getCalendarFormat(inputOptions));
+			if (controlEl.value !== calendarValue) controlEl.value = calendarValue;
+			return;
+		}
+
 		if (this.getControlValue(controlEl) !== nextValue) this.setControlValue(controlEl, nextValue);
 		if (valueType === 'number') {
 			const numericValue = nextValue === '' ? null : Number(nextValue);
@@ -1444,6 +1496,13 @@ export default class ConditionalRenderPlugin extends Plugin {
 			if (controlType === 'boolean') {
 				controlEl.type = 'checkbox';
 				controlEl.style.width = '';
+				controlEl.style.textAlign = '';
+				return;
+			}
+			if (controlType === 'calendar') {
+				controlEl.type = 'date';
+				controlEl.dataset.crDisplayType = 'calendar';
+				controlEl.style.width = '150px';
 				controlEl.style.textAlign = '';
 				return;
 			}
