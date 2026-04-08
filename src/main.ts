@@ -195,7 +195,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 		this.addSettingTab(new CRSettingTab(this.app, this));
-		console.log(t('log_loaded').replace('0.12.0', '0.14.2'));
+		console.log(t('log_loaded').replace('0.12.0', '0.15.0'));
 
 		this.registerProcessors();
 
@@ -380,11 +380,24 @@ export default class ConditionalRenderPlugin extends Plugin {
 		});
 	}
 
+	private detachDynamicDescendants(containerEl: HTMLElement) {
+		for (const element of Array.from(this.dynamicRenderElements)) {
+			if (containerEl.contains(element)) {
+				this.dynamicRenderElements.delete(element);
+			}
+		}
+	}
+
 	private clearDynamicContainer(containerEl: HTMLElement) {
+		this.detachDynamicDescendants(containerEl);
 		containerEl.className = '';
 		containerEl.style.display = '';
 		containerEl.removeAttribute('title');
 		containerEl.empty();
+	}
+
+	private renderDynamicMarkdown(containerEl: HTMLElement, markdown: string, sourcePath: string) {
+		return MarkdownRenderer.renderMarkdown(markdown, containerEl, sourcePath, this);
 	}
 
 	private applyTextHiddenVariantStyle(containerEl: HTMLElement, style: CRHiddenStyle) {
@@ -562,14 +575,14 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 		if (isTextHiddenStyle(style)) {
 			containerEl.className = style === 'text-grey' || style === 'text-gray' ? 'cr-block-text-grey' : 'cr-block-text';
-			void MarkdownRenderer.renderMarkdown(this.getHiddenReplacementText(hiddenTextOverride), containerEl, sourcePath, this).then(() => {
+			void this.renderDynamicMarkdown(containerEl, this.getHiddenReplacementText(hiddenTextOverride), sourcePath).then(() => {
 				this.applyTextHiddenVariantStyle(containerEl, style);
 			});
 			return;
 		}
 
 		containerEl.className = `cr-block-${style}`;
-		void MarkdownRenderer.renderMarkdown(originalMarkdown, containerEl, sourcePath, this);
+		void this.renderDynamicMarkdown(containerEl, originalMarkdown, sourcePath);
 	}
 
 	private registerDynamicRender(element: HTMLElement, binding: DynamicRenderBinding) {
@@ -660,7 +673,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			this.renderHiddenBlockInto(element, binding.style ?? this.settings.hiddenStyle, targetContent, binding.sourcePath, binding.hiddenTextOverride);
 		} else {
 			this.clearDynamicContainer(element);
-			void MarkdownRenderer.renderMarkdown(targetContent, element, binding.sourcePath, this);
+			void this.renderDynamicMarkdown(element, targetContent, binding.sourcePath);
 		}
 	}
 
