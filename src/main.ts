@@ -41,6 +41,9 @@ export type CRHiddenStyle =
 	| 'spoiler-white-round';
 
 type CRInputValueType = 'string' | 'number' | 'boolean';
+type CRInputControlType = 'string' | 'number' | 'boolean' | 'textarea' | 'select';
+type CRInputOptionValue = string | number | boolean | string[];
+type CRControlElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
 type CRInputSyntaxMode = 'typed' | 'legacy';
 
 interface ConditionalRenderSettings {
@@ -56,8 +59,8 @@ interface ParsedInputSpec {
 	raw: string;
 	target: string;
 	targetKind: 'yaml' | 'global';
-	explicitType?: CRInputValueType;
-	options: Record<string, string | number | boolean>;
+	explicitControlType?: CRInputControlType;
+	options: Record<string, CRInputOptionValue>;
 }
 
 interface InputBinding {
@@ -132,11 +135,13 @@ const ALL_HIDDEN_STYLES: readonly CRHiddenStyle[] = [
 	'spoiler-white-round',
 ];
 
-const INPUT_TYPE_ALIASES: Record<string, CRInputValueType> = {
+const INPUT_TYPE_ALIASES: Record<string, CRInputControlType> = {
 	bool: 'boolean',
 	boolean: 'boolean',
 	string: 'string',
 	number: 'number',
+	textarea: 'textarea',
+	select: 'select',
 };
 
 const isValidVarName = (name: string) => /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(name);
@@ -164,7 +169,7 @@ const resolveHiddenStyleToken = (token?: string | null): CRHiddenStyle | null =>
 class CRInputChild extends MarkdownRenderChild {
 	constructor(
 		containerEl: HTMLElement,
-		private readonly inputEl: HTMLInputElement,
+		private readonly inputEl: CRControlElement,
 		private readonly plugin: ConditionalRenderPlugin,
 	) {
 		super(containerEl);
@@ -177,8 +182,8 @@ class CRInputChild extends MarkdownRenderChild {
 
 export default class ConditionalRenderPlugin extends Plugin {
 	settings!: ConditionalRenderSettings;
-	private readonly inputBindings = new WeakMap<HTMLInputElement, InputBinding>();
-	private readonly inputStates = new WeakMap<HTMLInputElement, InputState>();
+	private readonly inputBindings = new WeakMap<CRControlElement, InputBinding>();
+	private readonly inputStates = new WeakMap<CRControlElement, InputState>();
 	private readonly dynamicRenderBindings = new WeakMap<HTMLElement, DynamicRenderBinding>();
 	private readonly dynamicRenderElements = new Set<HTMLElement>();
 	private readonly frontmatterSnapshots = new Map<string, string>();
@@ -717,16 +722,16 @@ export default class ConditionalRenderPlugin extends Plugin {
 		if (!typedMatch) {
 			return {
 				ok: false,
-				message: 'Invalid typed syntax. Use cr-input: bool(name) / string(name) / number(this.score)',
+				message: 'Invalid typed syntax. Use cr-input: bool(name) / string(name) / number(this.score) / textarea(note) / select(status, options=["a","b"])',
 			};
 		}
 
 		const rawType = typedMatch[1].toLowerCase();
-		const explicitType = INPUT_TYPE_ALIASES[rawType];
-		if (!explicitType) {
+		const explicitControlType = INPUT_TYPE_ALIASES[rawType];
+		if (!explicitControlType) {
 			return {
 				ok: false,
-				message: `Unsupported input type "${rawType}". Allowed: bool, string, number`,
+				message: `Unsupported input type "${rawType}". Allowed: bool, string, number, textarea, select`,
 			};
 		}
 
@@ -742,7 +747,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			return { ok: false, message: `Invalid target "${target}". Use a variable name or this.key` };
 		}
 
-		const options: Record<string, string | number | boolean> = {};
+		const options: Record<string, CRInputOptionValue> = {};
 		for (const rawOption of items.slice(1)) {
 			const option = rawOption.trim();
 			if (!option) continue;
@@ -758,6 +763,13 @@ export default class ConditionalRenderPlugin extends Plugin {
 			options[key] = this.parseOptionValue(valueText);
 		}
 
+		if (explicitControlType === 'select') {
+			const normalized = this.normalizeSelectOptions(options.options);
+			if (!normalized || normalized.length === 0) {
+				return { ok: false, message: 'select(...) requires options=["option1","option2"]' };
+			}
+		}
+
 		return {
 			ok: true,
 			value: {
@@ -765,7 +777,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 				raw,
 				target,
 				targetKind,
-				explicitType,
+				explicitControlType,
 				options,
 			},
 		};
@@ -805,12 +817,12 @@ export default class ConditionalRenderPlugin extends Plugin {
 				current += char;
 				continue;
 			}
-			if (char === '(') {
+			if (char === '(' || char === '[' || char === '{') {
 				depth += 1;
 				current += char;
 				continue;
 			}
-			if (char === ')') {
+			if (char === ')' || char === ']' || char === '}') {
 				depth = Math.max(0, depth - 1);
 				current += char;
 				continue;
@@ -827,19 +839,48 @@ export default class ConditionalRenderPlugin extends Plugin {
 		return result.map((item) => item.trim()).filter(Boolean);
 	}
 
-	private parseOptionValue(raw: string): string | number | boolean {
+	private parseOptionValue(raw: string): CRInputOptionValue {
 		const trimmed = raw.trim();
 		if (/^(true|false)$/i.test(trimmed)) return trimmed.toLowerCase() === 'true';
 		if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
-		const quoted = trimmed.match(/^(["'])([\s\S]*)\1$/);
+		const quoted = trimmed.match(/^(["'])([\s\S]*)$/);
 		if (quoted) return quoted[2];
+		if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
+			try {
+				const parsed = JSON.parse(trimmed);
+				if (Array.isArray(parsed) && parsed.every((item) => typeof item === 'string')) {
+					return parsed;
+				}
+			} catch {
+				// fall through
+			}
+		}
 		return trimmed;
 	}
 
+	private normalizeSelectOptions(value: CRInputOptionValue | undefined): string[] | null {
+		if (!Array.isArray(value)) return null;
+		const normalized = value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean);
+		return normalized.length > 0 ? normalized : null;
+	}
+
+	private getExplicitValueType(controlType: CRInputControlType): CRInputValueType {
+		if (controlType === 'boolean') return 'boolean';
+		if (controlType === 'number') return 'number';
+		return 'string';
+	}
+
+	private getDefaultControlTypeForValueType(valueType: CRInputValueType): CRInputControlType {
+		if (valueType === 'boolean') return 'boolean';
+		if (valueType === 'number') return 'number';
+		return 'string';
+	}
+
 	private resolveInputBinding(binding: InputBinding):
-		| { ok: true; valueType: CRInputValueType; value: unknown; options: ParsedInputSpec['options'] }
+		| { ok: true; controlType: CRInputControlType; valueType: CRInputValueType; value: unknown; options: ParsedInputSpec['options'] }
 		| { ok: false; message: string } {
 		const { spec, sourcePath } = binding;
+		const explicitValueType = spec.explicitControlType ? this.getExplicitValueType(spec.explicitControlType) : undefined;
 
 		if (spec.targetKind === 'global') {
 			const globalVar = this.settings.variables.find((v) => v.name === spec.target);
@@ -847,19 +888,26 @@ export default class ConditionalRenderPlugin extends Plugin {
 				return { ok: false, message: `Global variable "${spec.target}" not found in settings` };
 			}
 
-			if (spec.explicitType && spec.explicitType !== globalVar.type) {
+			if (explicitValueType && explicitValueType !== globalVar.type) {
 				return {
 					ok: false,
-					message: `Type mismatch for global variable "${spec.target}": settings=${globalVar.type}, input=${spec.explicitType}`,
+					message: `Type mismatch for global variable "${spec.target}": settings=${globalVar.type}, input=${explicitValueType}`,
 				};
 			}
 
-			const valueType = spec.explicitType ?? globalVar.type;
+			const valueType = explicitValueType ?? globalVar.type;
+			const controlType = spec.explicitControlType ?? this.getDefaultControlTypeForValueType(valueType);
+			if (controlType === 'select') {
+				const normalized = this.normalizeSelectOptions(spec.options.options);
+				if (!normalized || normalized.length === 0) {
+					return { ok: false, message: 'select(...) requires options=["option1","option2"]' };
+				}
+			}
+
 			let value: unknown = globalVar.value;
 			if (valueType === 'boolean') value = globalVar.value === 'true';
 			else if (valueType === 'number') value = globalVar.value === '' ? '' : Number(globalVar.value);
-
-			return { ok: true, valueType, value, options: spec.options };
+			return { ok: true, controlType, valueType, value, options: spec.options };
 		}
 
 		const yamlKey = spec.target.slice(5).trim();
@@ -871,7 +919,14 @@ export default class ConditionalRenderPlugin extends Plugin {
 				: typeof currentValue === 'number'
 					? 'number'
 					: 'string';
-		const valueType = spec.explicitType ?? inferredType;
+		const valueType = explicitValueType ?? inferredType;
+		const controlType = spec.explicitControlType ?? this.getDefaultControlTypeForValueType(valueType);
+		if (controlType === 'select') {
+			const normalized = this.normalizeSelectOptions(spec.options.options);
+			if (!normalized || normalized.length === 0) {
+				return { ok: false, message: 'select(...) requires options=["option1","option2"]' };
+			}
+		}
 
 		let value: unknown = currentValue;
 		if (value === undefined || value === null) {
@@ -880,39 +935,71 @@ export default class ConditionalRenderPlugin extends Plugin {
 		if (valueType === 'number' && typeof value === 'number' && !Number.isFinite(value)) value = '';
 		if (valueType === 'number' && typeof value === 'string') value = value.trim();
 		if (valueType === 'boolean' && typeof value !== 'boolean') value = value === true;
+		if (valueType === 'string' && typeof value !== 'string') value = String(value ?? '');
 
-		return { ok: true, valueType, value, options: spec.options };
+		return { ok: true, controlType, valueType, value, options: spec.options };
+	}
+
+	private createControlElement(spec: ParsedInputSpec): CRControlElement {
+		if (spec.explicitControlType === 'textarea') {
+			const textarea = document.createElement('textarea');
+			textarea.className = 'cr-interactive-input';
+			textarea.dataset.crControl = 'true';
+			return textarea;
+		}
+		if (spec.explicitControlType === 'select') {
+			const select = document.createElement('select');
+			select.className = 'cr-interactive-input';
+			select.dataset.crControl = 'true';
+			return select;
+		}
+		const input = document.createElement('input');
+		input.className = 'cr-interactive-input';
+		input.dataset.crControl = 'true';
+		return input;
 	}
 
 	private renderInteractiveInput(codeEl: HTMLElement, spec: ParsedInputSpec, context: MarkdownPostProcessorContext) {
 		const wrapper = document.createElement('span');
 		wrapper.style.display = 'inline-flex';
-		wrapper.style.alignItems = 'center';
+		wrapper.style.alignItems = spec.explicitControlType === 'textarea' ? 'flex-start' : 'center';
 		wrapper.style.gap = '4px';
 
-		const inputEl = document.createElement('input');
-		inputEl.className = 'cr-interactive-input';
-		wrapper.appendChild(inputEl);
+		const controlEl = this.createControlElement(spec);
+		wrapper.appendChild(controlEl);
 		codeEl.replaceWith(wrapper);
 
 		const binding: InputBinding = {
 			sourcePath: context.sourcePath,
 			spec,
 		};
-		this.inputBindings.set(inputEl, binding);
-		this.inputStates.set(inputEl, { isEditing: false, isComposing: false, pendingCommitTimer: null });
+		this.inputBindings.set(controlEl, binding);
+		this.inputStates.set(controlEl, { isEditing: false, isComposing: false, pendingCommitTimer: null });
 
-		this.setupInputListeners(inputEl);
-		context.addChild(new CRInputChild(wrapper, inputEl, this));
-		this.scheduleSyncForInput(inputEl, { immediate: true, delayed: true });
+		this.setupInputListeners(controlEl);
+		context.addChild(new CRInputChild(wrapper, controlEl, this));
+		this.scheduleSyncForInput(controlEl, { immediate: true, delayed: true });
 	}
 
-	private getInputWrapper(inputEl: HTMLInputElement): HTMLElement | null {
-		return inputEl.parentElement;
+	private isInputElement(controlEl: CRControlElement): controlEl is HTMLInputElement {
+		return controlEl instanceof HTMLInputElement;
 	}
 
-	private ensureNumberStepperControls(inputEl: HTMLInputElement) {
-		const wrapper = this.getInputWrapper(inputEl);
+	private isTextAreaElement(controlEl: CRControlElement): controlEl is HTMLTextAreaElement {
+		return controlEl instanceof HTMLTextAreaElement;
+	}
+
+	private isSelectElement(controlEl: CRControlElement): controlEl is HTMLSelectElement {
+		return controlEl instanceof HTMLSelectElement;
+	}
+
+	private getInputWrapper(controlEl: CRControlElement): HTMLElement | null {
+		return controlEl.parentElement;
+	}
+
+	private ensureNumberStepperControls(controlEl: CRControlElement) {
+		if (!this.isInputElement(controlEl)) return;
+		const wrapper = this.getInputWrapper(controlEl);
 		if (!wrapper) return;
 
 		wrapper.style.display = 'inline-flex';
@@ -931,9 +1018,9 @@ export default class ConditionalRenderPlugin extends Plugin {
 			decrementBtn.addEventListener('click', (event) => {
 				event.preventDefault();
 				event.stopPropagation();
-				void this.adjustNumberInput(inputEl, -1);
+				void this.adjustNumberInput(controlEl, -1);
 			});
-			wrapper.insertBefore(decrementBtn, inputEl);
+			wrapper.insertBefore(decrementBtn, controlEl);
 		}
 
 		if (!incrementBtn) {
@@ -945,14 +1032,14 @@ export default class ConditionalRenderPlugin extends Plugin {
 			incrementBtn.addEventListener('click', (event) => {
 				event.preventDefault();
 				event.stopPropagation();
-				void this.adjustNumberInput(inputEl, 1);
+				void this.adjustNumberInput(controlEl, 1);
 			});
 			wrapper.appendChild(incrementBtn);
 		}
 	}
 
-	private clearNumberStepperControls(inputEl: HTMLInputElement) {
-		const wrapper = this.getInputWrapper(inputEl);
+	private clearNumberStepperControls(controlEl: CRControlElement) {
+		const wrapper = this.getInputWrapper(controlEl);
 		if (!wrapper) return;
 		wrapper.querySelectorAll('[data-cr-stepper]').forEach((el) => el.remove());
 	}
@@ -973,8 +1060,8 @@ export default class ConditionalRenderPlugin extends Plugin {
 		buttonEl.style.cursor = 'pointer';
 	}
 
-	private getNumberConstraints(inputEl: HTMLInputElement): { min?: number; max?: number; step: number } {
-		const options = this.getInputOptions(inputEl);
+	private getNumberConstraints(controlEl: CRControlElement): { min?: number; max?: number; step: number } {
+		const options = this.getInputOptions(controlEl);
 		const min = typeof options.min === 'number' && Number.isFinite(options.min) ? options.min : undefined;
 		const max = typeof options.max === 'number' && Number.isFinite(options.max) ? options.max : undefined;
 		const step = typeof options.step === 'number' && Number.isFinite(options.step) && options.step > 0 ? options.step : 1;
@@ -988,12 +1075,12 @@ export default class ConditionalRenderPlugin extends Plugin {
 		return next;
 	}
 
-	private updateNumberStepperDisabledState(inputEl: HTMLInputElement, currentValue: number | null) {
-		const wrapper = this.getInputWrapper(inputEl);
+	private updateNumberStepperDisabledState(controlEl: CRControlElement, currentValue: number | null) {
+		const wrapper = this.getInputWrapper(controlEl);
 		if (!wrapper) return;
 		const decrementBtn = wrapper.querySelector<HTMLButtonElement>('[data-cr-stepper="decrement"]');
 		const incrementBtn = wrapper.querySelector<HTMLButtonElement>('[data-cr-stepper="increment"]');
-		const { min, max } = this.getNumberConstraints(inputEl);
+		const { min, max } = this.getNumberConstraints(controlEl);
 
 		if (decrementBtn) {
 			decrementBtn.disabled = currentValue !== null && typeof min === 'number' && currentValue <= min;
@@ -1007,80 +1094,84 @@ export default class ConditionalRenderPlugin extends Plugin {
 		}
 	}
 
-	private async adjustNumberInput(inputEl: HTMLInputElement, direction: -1 | 1) {
-		const binding = this.inputBindings.get(inputEl);
+	private async adjustNumberInput(controlEl: CRControlElement, direction: -1 | 1) {
+		if (!this.isInputElement(controlEl)) return;
+		const binding = this.inputBindings.get(controlEl);
 		if (!binding) return;
 
 		const resolved = this.resolveInputBinding(binding);
 		if (!resolved.ok || resolved.valueType !== 'number') return;
 
-		const constraints = this.getNumberConstraints(inputEl);
+		const constraints = this.getNumberConstraints(controlEl);
 		const rawCurrent = resolved.value;
 		const current = typeof rawCurrent === 'number' && Number.isFinite(rawCurrent)
 			? rawCurrent
 			: (typeof constraints.min === 'number' ? constraints.min : 0);
 		const nextValue = this.clampNumberValue(current + direction * constraints.step, constraints);
 
-		inputEl.value = String(nextValue);
-		await this.commitInputValue(inputEl, nextValue);
-		this.updateNumberStepperDisabledState(inputEl, nextValue);
+		controlEl.value = String(nextValue);
+		await this.commitInputValue(controlEl, nextValue);
+		this.updateNumberStepperDisabledState(controlEl, nextValue);
 	}
 
-	private setupInputListeners(inputEl: HTMLInputElement) {
-		inputEl.addEventListener('focus', () => {
-			const state = this.getInputState(inputEl);
-			state.isEditing = inputEl.type !== 'checkbox' && inputEl.dataset.crDisplayType !== 'number';
+	private setupInputListeners(controlEl: CRControlElement) {
+		controlEl.addEventListener('focus', () => {
+			const state = this.getInputState(controlEl);
+			state.isEditing = this.isTextLikeControl(controlEl);
 		});
 
-		inputEl.addEventListener('blur', () => {
-			const state = this.getInputState(inputEl);
-			this.flushPendingCommit(inputEl);
+		controlEl.addEventListener('blur', () => {
+			const state = this.getInputState(controlEl);
+			this.flushPendingCommit(controlEl);
 			state.isEditing = false;
 			state.isComposing = false;
-			this.scheduleSyncForInput(inputEl, { immediate: false, delayed: true });
+			this.scheduleSyncForInput(controlEl, { immediate: false, delayed: true });
 		});
 
-		inputEl.addEventListener('compositionstart', () => {
-			if (inputEl.dataset.crDisplayType === 'number') return;
-			const state = this.getInputState(inputEl);
+		controlEl.addEventListener('compositionstart', () => {
+			if (!this.isTextLikeControl(controlEl)) return;
+			const state = this.getInputState(controlEl);
 			state.isEditing = true;
 			state.isComposing = true;
 		});
 
-		inputEl.addEventListener('compositionend', () => {
-			if (inputEl.dataset.crDisplayType === 'number') return;
-			const state = this.getInputState(inputEl);
+		controlEl.addEventListener('compositionend', () => {
+			if (!this.isTextLikeControl(controlEl)) return;
+			const state = this.getInputState(controlEl);
 			state.isComposing = false;
-			if (inputEl.type !== 'checkbox') {
-				this.scheduleCommit(inputEl);
+			this.scheduleCommit(controlEl);
+		});
+
+		controlEl.addEventListener('input', () => {
+			if (!this.isTextLikeControl(controlEl)) return;
+			this.scheduleCommit(controlEl);
+		});
+
+		controlEl.addEventListener('change', () => {
+			if (this.isSelectElement(controlEl)) {
+				void this.commitInputValue(controlEl);
+				return;
+			}
+			if (this.isInputElement(controlEl) && controlEl.type === 'checkbox') {
+				void this.commitInputValue(controlEl);
+				return;
+			}
+			if (this.isTextLikeControl(controlEl)) {
+				this.scheduleCommit(controlEl);
 			}
 		});
 
-		inputEl.addEventListener('input', () => {
-			if (inputEl.type === 'checkbox' || inputEl.dataset.crDisplayType === 'number') return;
-			this.scheduleCommit(inputEl);
-		});
-
-		inputEl.addEventListener('change', () => {
-			if (inputEl.dataset.crDisplayType === 'number') return;
-			if (inputEl.type === 'checkbox') {
-				void this.commitInputValue(inputEl);
-			} else {
-				this.scheduleCommit(inputEl);
-			}
-		});
-
-		inputEl.addEventListener('keydown', (event) => {
+		controlEl.addEventListener('keydown', (event) => {
 			event.stopPropagation();
-			if (inputEl.dataset.crDisplayType === 'number') {
+			if (this.isInputElement(controlEl) && controlEl.dataset.crDisplayType === 'number') {
 				if (event.key === 'ArrowUp') {
 					event.preventDefault();
-					void this.adjustNumberInput(inputEl, 1);
+					void this.adjustNumberInput(controlEl, 1);
 					return;
 				}
 				if (event.key === 'ArrowDown') {
 					event.preventDefault();
-					void this.adjustNumberInput(inputEl, -1);
+					void this.adjustNumberInput(controlEl, -1);
 					return;
 				}
 				if (!['Tab', 'Shift', 'ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) {
@@ -1088,60 +1179,95 @@ export default class ConditionalRenderPlugin extends Plugin {
 				}
 				return;
 			}
-			if (event.key === 'Enter' && inputEl.type !== 'checkbox') {
-				inputEl.blur();
+			if (this.isInputElement(controlEl) && controlEl.type !== 'checkbox' && event.key === 'Enter') {
+				controlEl.blur();
 			}
 		});
-		inputEl.addEventListener('click', (event) => event.stopPropagation());
+		controlEl.addEventListener('click', (event) => event.stopPropagation());
 	}
 
-	private getInputState(inputEl: HTMLInputElement): InputState {
-		let state = this.inputStates.get(inputEl);
+	private getInputState(controlEl: CRControlElement): InputState {
+		let state = this.inputStates.get(controlEl);
 		if (!state) {
 			state = { isEditing: false, isComposing: false, pendingCommitTimer: null };
-			this.inputStates.set(inputEl, state);
+			this.inputStates.set(controlEl, state);
 		}
 		return state;
 	}
 
-	private isTextLikeInput(inputEl: HTMLInputElement) {
-		return inputEl.type === 'text' || inputEl.type === 'number';
+	private isTextLikeControl(controlEl: CRControlElement) {
+		if (this.isTextAreaElement(controlEl)) return true;
+		if (this.isInputElement(controlEl)) return controlEl.type === 'text' || controlEl.type === 'number';
+		return false;
 	}
 
-	private getInputOptions(inputEl: HTMLInputElement): Record<string, string | number | boolean> {
-		return this.inputBindings.get(inputEl)?.spec.options ?? {};
+	private getInputOptions(controlEl: CRControlElement): Record<string, CRInputOptionValue> {
+		return this.inputBindings.get(controlEl)?.spec.options ?? {};
 	}
 
-
-	private scheduleCommit(inputEl: HTMLInputElement) {
-		const state = this.getInputState(inputEl);
+	private scheduleCommit(controlEl: CRControlElement) {
+		const state = this.getInputState(controlEl);
 		if (state.isComposing) return;
 		if (state.pendingCommitTimer) window.clearTimeout(state.pendingCommitTimer);
 
-		const debounce = this.getInputDebounce(inputEl);
+		const debounce = this.getInputDebounce(controlEl);
 		state.pendingCommitTimer = window.setTimeout(() => {
 			state.pendingCommitTimer = null;
-			void this.commitInputValue(inputEl);
+			void this.commitInputValue(controlEl);
 		}, debounce);
 	}
 
-	private flushPendingCommit(inputEl: HTMLInputElement) {
-		const state = this.getInputState(inputEl);
+	private flushPendingCommit(controlEl: CRControlElement) {
+		const state = this.getInputState(controlEl);
 		if (state.pendingCommitTimer) {
 			window.clearTimeout(state.pendingCommitTimer);
 			state.pendingCommitTimer = null;
-			void this.commitInputValue(inputEl);
+			void this.commitInputValue(controlEl);
 		}
 	}
 
-	private getInputDebounce(inputEl: HTMLInputElement): number {
-		const binding = this.inputBindings.get(inputEl);
+	private getInputDebounce(controlEl: CRControlElement): number {
+		const binding = this.inputBindings.get(controlEl);
 		const optionValue = binding?.spec.options.debounce;
 		return typeof optionValue === 'number' && Number.isFinite(optionValue) && optionValue >= 0 ? optionValue : 250;
 	}
 
-	private async commitInputValue(inputEl: HTMLInputElement, overrideValue?: string | number | boolean) {
-		const binding = this.inputBindings.get(inputEl);
+	private getControlValue(controlEl: CRControlElement): string {
+		if (this.isSelectElement(controlEl)) return controlEl.value;
+		return controlEl.value;
+	}
+
+	private setControlValue(controlEl: CRControlElement, value: string) {
+		if (this.isSelectElement(controlEl)) {
+			controlEl.value = value;
+			return;
+		}
+		controlEl.value = value;
+	}
+
+	private applyControlResolutionError(controlEl: CRControlElement, message: string) {
+		if (this.isInputElement(controlEl)) {
+			controlEl.type = 'text';
+			controlEl.readOnly = true;
+			controlEl.value = `Error: ${message}`;
+			this.clearNumberStepperControls(controlEl);
+			return;
+		}
+		if (this.isTextAreaElement(controlEl)) {
+			controlEl.readOnly = true;
+			controlEl.value = `Error: ${message}`;
+			return;
+		}
+		controlEl.disabled = true;
+		controlEl.innerHTML = '';
+		const optionEl = document.createElement('option');
+		optionEl.value = '';
+		optionEl.textContent = `Error: ${message}`;
+		controlEl.appendChild(optionEl);
+	}
+
+	private async commitInputValue(controlEl: CRControlElement, overrideValue?: string | number | boolean) {
+		const binding = this.inputBindings.get(controlEl);
 		if (!binding) return;
 
 		const resolved = this.resolveInputBinding(binding);
@@ -1150,22 +1276,24 @@ export default class ConditionalRenderPlugin extends Plugin {
 		const valueType = resolved.valueType;
 		let newValue: string | number | boolean;
 		if (valueType === 'boolean') {
-			newValue = typeof overrideValue === 'boolean' ? overrideValue : inputEl.checked;
+			newValue = typeof overrideValue === 'boolean'
+				? overrideValue
+				: (this.isInputElement(controlEl) ? controlEl.checked : false);
 		} else if (valueType === 'number') {
 			if (typeof overrideValue === 'number' && Number.isFinite(overrideValue)) {
-				newValue = this.clampNumberValue(overrideValue, this.getNumberConstraints(inputEl));
+				newValue = this.clampNumberValue(overrideValue, this.getNumberConstraints(controlEl));
 			} else {
-				const parsed = Number(inputEl.value);
+				const parsed = Number(this.getControlValue(controlEl));
 				if (!Number.isFinite(parsed)) {
-					this.scheduleSyncForInput(inputEl, { immediate: false, delayed: true });
+					this.scheduleSyncForInput(controlEl, { immediate: false, delayed: true });
 					return;
 				}
-				newValue = this.clampNumberValue(parsed, this.getNumberConstraints(inputEl));
+				newValue = this.clampNumberValue(parsed, this.getNumberConstraints(controlEl));
 			}
-			inputEl.value = String(newValue);
-			this.updateNumberStepperDisabledState(inputEl, newValue);
+			this.setControlValue(controlEl, String(newValue));
+			this.updateNumberStepperDisabledState(controlEl, newValue);
 		} else {
-			newValue = typeof overrideValue === 'string' ? overrideValue : inputEl.value;
+			newValue = typeof overrideValue === 'string' ? overrideValue : this.getControlValue(controlEl);
 		}
 
 		if (binding.spec.targetKind === 'yaml') {
@@ -1190,14 +1318,14 @@ export default class ConditionalRenderPlugin extends Plugin {
 		this.syncAllInputs(undefined, { skipActiveTextInputs: true });
 	}
 
-	scheduleSyncForInput(inputEl: HTMLInputElement, mode: { immediate: boolean; delayed: boolean }) {
+	scheduleSyncForInput(controlEl: CRControlElement, mode: { immediate: boolean; delayed: boolean }) {
 		if (mode.immediate) {
-			this.syncSingleInput(inputEl, undefined, { skipActiveTextInputs: true });
+			this.syncSingleInput(controlEl, undefined, { skipActiveTextInputs: true });
 		}
 		if (mode.delayed) {
-			window.setTimeout(() => this.syncSingleInput(inputEl, undefined, { skipActiveTextInputs: true }), 60);
-			window.setTimeout(() => this.syncSingleInput(inputEl, undefined, { skipActiveTextInputs: true }), 220);
-			window.setTimeout(() => this.syncSingleInput(inputEl, undefined, { skipActiveTextInputs: true }), 500);
+			window.setTimeout(() => this.syncSingleInput(controlEl, undefined, { skipActiveTextInputs: true }), 60);
+			window.setTimeout(() => this.syncSingleInput(controlEl, undefined, { skipActiveTextInputs: true }), 220);
+			window.setTimeout(() => this.syncSingleInput(controlEl, undefined, { skipActiveTextInputs: true }), 500);
 		}
 	}
 
@@ -1209,81 +1337,144 @@ export default class ConditionalRenderPlugin extends Plugin {
 	}
 
 	syncSingleInput(
-		inputEl: HTMLInputElement,
+		controlEl: CRControlElement,
 		changedPath?: string,
 		options: { skipActiveTextInputs?: boolean } = {},
 	) {
-		const binding = this.inputBindings.get(inputEl);
+		const binding = this.inputBindings.get(controlEl);
 		if (!binding) return;
 		if (changedPath && binding.spec.targetKind === 'yaml' && binding.sourcePath !== changedPath) return;
 
-		const state = this.getInputState(inputEl);
-		if (options.skipActiveTextInputs && this.isTextLikeInput(inputEl)) {
+		const state = this.getInputState(controlEl);
+		if (options.skipActiveTextInputs && this.isTextLikeControl(controlEl)) {
 			if (state.isEditing || state.isComposing || state.pendingCommitTimer) return;
 		}
 
 		const resolved = this.resolveInputBinding(binding);
 		if (!resolved.ok) {
-			inputEl.type = 'text';
-			if (!options.skipActiveTextInputs || !state.isEditing) {
-				inputEl.value = `Error: ${resolved.message}`;
+			this.applyControlResolutionError(controlEl, resolved.message);
+			return;
+		}
+
+		const { controlType, valueType, value, options: inputOptions } = resolved;
+		this.applyControlOptions(controlEl, controlType, inputOptions, value === undefined || value === null ? '' : String(value));
+
+		if (valueType === 'boolean') {
+			if (this.isInputElement(controlEl)) {
+				const checked = !!value;
+				if (controlEl.checked !== checked) controlEl.checked = checked;
 			}
 			return;
 		}
 
-		const { valueType, value, options: inputOptions } = resolved;
-		const desiredType = valueType === 'boolean' ? 'checkbox' : 'text';
-		if (inputEl.type !== desiredType) inputEl.type = desiredType;
-		this.applyInputOptions(inputEl, valueType, inputOptions);
-
-		if (valueType === 'boolean') {
-			const checked = !!value;
-			if (inputEl.checked !== checked) inputEl.checked = checked;
+		const nextValue = value === undefined || value === null ? '' : String(value);
+		if (this.isSelectElement(controlEl)) {
+			if (controlEl.value !== nextValue) controlEl.value = nextValue;
 			return;
 		}
 
-		const nextValue = value === undefined || value === null ? '' : String(value);
-		if (inputEl.value !== nextValue) inputEl.value = nextValue;
+		if (this.getControlValue(controlEl) !== nextValue) this.setControlValue(controlEl, nextValue);
 		if (valueType === 'number') {
 			const numericValue = nextValue === '' ? null : Number(nextValue);
-			this.updateNumberStepperDisabledState(inputEl, Number.isFinite(numericValue as number) ? (numericValue as number) : null);
+			this.updateNumberStepperDisabledState(controlEl, Number.isFinite(numericValue as number) ? (numericValue as number) : null);
 		}
 	}
 
-	private applyInputOptions(
-		inputEl: HTMLInputElement,
-		valueType: CRInputValueType,
-		options: Record<string, string | number | boolean>,
-	) {
-		const placeholder = options.placeholder;
-		inputEl.placeholder = typeof placeholder === 'string' ? placeholder : '';
-
-		if (valueType === 'number') {
-			inputEl.dataset.crDisplayType = 'number';
-			inputEl.readOnly = true;
-			inputEl.removeAttribute('min');
-			inputEl.removeAttribute('max');
-			inputEl.removeAttribute('step');
-			inputEl.removeAttribute('inputmode');
-			inputEl.style.width = '72px';
-			inputEl.style.textAlign = 'center';
-			this.ensureNumberStepperControls(inputEl);
-		} else {
-			delete inputEl.dataset.crDisplayType;
-			inputEl.readOnly = false;
-			inputEl.removeAttribute('min');
-			inputEl.removeAttribute('max');
-			inputEl.removeAttribute('step');
-			inputEl.removeAttribute('inputmode');
-			inputEl.style.textAlign = '';
-			inputEl.style.width = valueType === 'boolean' ? '' : '120px';
-			this.clearNumberStepperControls(inputEl);
+	private applySelectOptions(controlEl: HTMLSelectElement, options: Record<string, CRInputOptionValue>, currentValue: string) {
+		const normalized = this.normalizeSelectOptions(options.options) ?? [];
+		const placeholder = typeof options.placeholder === 'string' ? options.placeholder : '';
+		const values = [...normalized];
+		if (currentValue && !values.includes(currentValue)) {
+			values.unshift(currentValue);
 		}
+
+		const signature = JSON.stringify({ values, placeholder, currentValue });
+		if (controlEl.dataset.crOptionsSignature === signature) {
+			controlEl.value = currentValue;
+			return;
+		}
+
+		controlEl.innerHTML = '';
+		if (placeholder) {
+			const placeholderOption = document.createElement('option');
+			placeholderOption.value = '';
+			placeholderOption.textContent = placeholder;
+			controlEl.appendChild(placeholderOption);
+		}
+		for (const optionValue of values) {
+			const optionEl = document.createElement('option');
+			optionEl.value = optionValue;
+			optionEl.textContent = optionValue;
+			controlEl.appendChild(optionEl);
+		}
+		controlEl.dataset.crOptionsSignature = signature;
+		controlEl.value = currentValue;
+	}
+
+	private applyControlOptions(
+		controlEl: CRControlElement,
+		controlType: CRInputControlType,
+		options: Record<string, CRInputOptionValue>,
+		currentValue: string,
+	) {
+		const placeholder = typeof options.placeholder === 'string' ? options.placeholder : '';
+
+		if (this.isInputElement(controlEl)) {
+			controlEl.disabled = false;
+			controlEl.readOnly = false;
+			controlEl.placeholder = placeholder;
+			controlEl.style.minHeight = '';
+			controlEl.style.resize = '';
+			controlEl.style.verticalAlign = '';
+			if (controlType === 'number') {
+				controlEl.type = 'text';
+				controlEl.dataset.crDisplayType = 'number';
+				controlEl.readOnly = true;
+				controlEl.removeAttribute('min');
+				controlEl.removeAttribute('max');
+				controlEl.removeAttribute('step');
+				controlEl.removeAttribute('inputmode');
+				controlEl.style.width = '72px';
+				controlEl.style.textAlign = 'center';
+				this.ensureNumberStepperControls(controlEl);
+				return;
+			}
+			delete controlEl.dataset.crDisplayType;
+			this.clearNumberStepperControls(controlEl);
+			if (controlType === 'boolean') {
+				controlEl.type = 'checkbox';
+				controlEl.style.width = '';
+				controlEl.style.textAlign = '';
+				return;
+			}
+			controlEl.type = 'text';
+			controlEl.style.width = '120px';
+			controlEl.style.textAlign = '';
+			return;
+		}
+
+		if (this.isTextAreaElement(controlEl)) {
+			controlEl.disabled = false;
+			controlEl.readOnly = false;
+			controlEl.placeholder = placeholder;
+			const rows = typeof options.rows === 'number' && Number.isFinite(options.rows) && options.rows > 0 ? Math.floor(options.rows) : 3;
+			controlEl.rows = rows;
+			controlEl.style.width = '240px';
+			controlEl.style.minHeight = `${rows * 1.8}em`;
+			controlEl.style.resize = 'vertical';
+			controlEl.style.verticalAlign = 'top';
+			return;
+		}
+
+		controlEl.disabled = false;
+		controlEl.style.width = '160px';
+		controlEl.style.textAlign = '';
+		this.applySelectOptions(controlEl, options, currentValue);
 	}
 
 	syncAllInputs(changedPath?: string, options: { skipActiveTextInputs?: boolean } = {}) {
-		const inputs = document.querySelectorAll<HTMLInputElement>('.cr-interactive-input');
-		inputs.forEach((inputEl) => this.syncSingleInput(inputEl, changedPath, options));
+		const controls = document.querySelectorAll<HTMLElement>('[data-cr-control="true"]');
+		controls.forEach((controlEl) => this.syncSingleInput(controlEl as CRControlElement, changedPath, options));
 	}
 
 	private requestDebouncedRefresh(sourcePath?: string) {
