@@ -591,6 +591,23 @@ export default class ConditionalRenderPlugin extends Plugin {
 	private registerDynamicRender(element: HTMLElement, binding: DynamicRenderBinding) {
 		this.dynamicRenderBindings.set(element, binding);
 		this.dynamicRenderElements.add(element);
+		element.dataset.crDynamic = 'true';
+		element.dataset.crDynamicBinding = JSON.stringify(binding);
+	}
+
+	private getDynamicRenderBinding(element: HTMLElement): DynamicRenderBinding | null {
+		const existing = this.dynamicRenderBindings.get(element);
+		if (existing) return existing;
+
+		const raw = element.dataset.crDynamicBinding;
+		if (!raw) return null;
+		try {
+			const parsed = JSON.parse(raw) as DynamicRenderBinding;
+			this.dynamicRenderBindings.set(element, parsed);
+			return parsed;
+		} catch {
+			return null;
+		}
 	}
 
 	private pruneDynamicRenderElements() {
@@ -621,7 +638,8 @@ export default class ConditionalRenderPlugin extends Plugin {
 	}
 
 	private refreshDynamicRender(element: HTMLElement) {
-		const binding = this.dynamicRenderBindings.get(element);
+		if (!element.isConnected) return;
+		const binding = this.getDynamicRenderBinding(element);
 		if (!binding) return;
 
 		if (binding.kind === 'inline-expression') {
@@ -682,10 +700,13 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 	private refreshDynamicRenders(changedPath?: string) {
 		this.pruneDynamicRenderElements();
-		for (const element of this.dynamicRenderElements) {
-			const binding = this.dynamicRenderBindings.get(element);
+
+		const liveElements = Array.from(document.querySelectorAll<HTMLElement>('[data-cr-dynamic="true"]'));
+		for (const element of liveElements) {
+			const binding = this.getDynamicRenderBinding(element);
 			if (!binding) continue;
 			if (changedPath && binding.sourcePath !== changedPath) continue;
+			this.dynamicRenderElements.add(element);
 			this.refreshDynamicRender(element);
 		}
 	}
