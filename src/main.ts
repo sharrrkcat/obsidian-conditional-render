@@ -195,16 +195,15 @@ export default class ConditionalRenderPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 		this.addSettingTab(new CRSettingTab(this.app, this));
-		console.log(t('log_loaded').replace('0.12.0', '0.15.0'));
+		console.log(t('log_loaded').replace('0.12.0', '0.15.1'));
 
 		this.registerProcessors();
 
 		this.registerEvent(
 			this.app.metadataCache.on('changed', (file) => {
 				this.scheduleSyncByPath(file.path);
-				if (this.didFrontmatterChange(file.path)) {
-					this.scheduleDynamicRefresh(file.path);
-				}
+				this.didFrontmatterChange(file.path);
+				this.scheduleDynamicRefresh(file.path);
 			}),
 		);
 
@@ -212,6 +211,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			this.app.vault.on('modify', (file) => {
 				if (file instanceof TFile && file.extension === 'md') {
 					this.scheduleSyncByPath(file.path);
+					this.scheduleDynamicRefresh(file.path);
 				}
 			}),
 		);
@@ -1644,7 +1644,7 @@ class CRSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl('h2', { text: t('settings_title').replace('0.12.0', '0.14.2') });
+		containerEl.createEl('h2', { text: t('settings_title').replace('0.12.0', '0.15.1') });
 
 		new Setting(containerEl)
 			.setName(t('plugin_identifier_name'))
