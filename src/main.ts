@@ -27,6 +27,12 @@ export type CRHiddenStyle =
 	| 'text'
 	| 'text-grey'
 	| 'text-gray'
+	| 'text-red'
+	| 'text-blue'
+	| 'text-green'
+	| 'text-white'
+	| 'text-yellow'
+	| 'text-rainbow'
 	| 'underline'
 	| 'blank'
 	| 'spoiler'
@@ -67,10 +73,11 @@ interface InputState {
 
 interface DynamicRenderBinding {
 	sourcePath: string;
-	kind: 'inline-expression' | 'inline-default' | 'block';
+	kind: 'inline-expression' | 'inline-default' | 'inline-conditional' | 'block';
 	style?: CRHiddenStyle;
 	expression?: string;
 	rawContent?: string;
+	hiddenTextOverride?: string;
 	condition?: string;
 	trueContent?: string;
 	falseContent?: string;
@@ -92,6 +99,12 @@ const SHORT_NAME_MAP: Record<string, CRHiddenStyle> = {
 	n: 'none',
 	t: 'text',
 	tg: 'text-grey',
+	tr: 'text-red',
+	tb: 'text-blue',
+	tgn: 'text-green',
+	tw: 'text-white',
+	ty: 'text-yellow',
+	trb: 'text-rainbow',
 	u: 'underline',
 	b: 'blank',
 	sp: 'spoiler',
@@ -99,6 +112,25 @@ const SHORT_NAME_MAP: Record<string, CRHiddenStyle> = {
 	spr: 'spoiler-round',
 	spwr: 'spoiler-white-round',
 };
+
+const ALL_HIDDEN_STYLES: readonly CRHiddenStyle[] = [
+	'none',
+	'text',
+	'text-grey',
+	'text-gray',
+	'text-red',
+	'text-blue',
+	'text-green',
+	'text-white',
+	'text-yellow',
+	'text-rainbow',
+	'underline',
+	'blank',
+	'spoiler',
+	'spoiler-white',
+	'spoiler-round',
+	'spoiler-white-round',
+];
 
 const INPUT_TYPE_ALIASES: Record<string, CRInputValueType> = {
 	bool: 'boolean',
@@ -110,6 +142,24 @@ const INPUT_TYPE_ALIASES: Record<string, CRInputValueType> = {
 const isValidVarName = (name: string) => /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(name);
 const isValidIdentifier = (name: string) => /^[a-zA-Z0-9_-]+$/.test(name);
 const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const isTextHiddenStyle = (style: CRHiddenStyle) => [
+	'text',
+	'text-grey',
+	'text-gray',
+	'text-red',
+	'text-blue',
+	'text-green',
+	'text-white',
+	'text-yellow',
+	'text-rainbow',
+].includes(style);
+
+const resolveHiddenStyleToken = (token?: string | null): CRHiddenStyle | null => {
+	if (!token) return null;
+	if (ALL_HIDDEN_STYLES.includes(token as CRHiddenStyle)) return token as CRHiddenStyle;
+	return SHORT_NAME_MAP[token] ?? null;
+};
 
 class CRInputChild extends MarkdownRenderChild {
 	constructor(
@@ -174,21 +224,9 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 	registerProcessors() {
 		const id = this.settings.identifier;
-		const styles: CRHiddenStyle[] = [
-			'none',
-			'text',
-			'text-grey',
-			'text-gray',
-			'underline',
-			'blank',
-			'spoiler',
-			'spoiler-white',
-			'spoiler-round',
-			'spoiler-white-round',
-		];
 
 		this.registerCodeBlock(id, null);
-		styles.forEach((style) => this.registerCodeBlock(`${id}-${style}`, style));
+		ALL_HIDDEN_STYLES.forEach((style) => this.registerCodeBlock(`${id}-${style}`, style));
 		Object.entries(SHORT_NAME_MAP).forEach(([short, full]) => this.registerCodeBlock(`${id}-${short}`, full));
 
 		this.registerMarkdownPostProcessor((element, context) => {
@@ -203,6 +241,34 @@ export default class ConditionalRenderPlugin extends Plugin {
 					continue;
 				}
 
+				const inlineIfRegex = new RegExp(`^${escapeRegex(id)}if(?:-([a-z-]+))?:\\s*([\\s\\S]*)$`);
+				const inlineIfMatch = text.match(inlineIfRegex);
+				if (inlineIfMatch) {
+					const styleToken = inlineIfMatch[1];
+					const activeStyle = resolveHiddenStyleToken(styleToken) ?? this.settings.hiddenStyle;
+					const parsedInlineConditional = this.parseInlineConditionalSyntax(
+						inlineIfMatch[2].trim(),
+						isTextHiddenStyle(activeStyle),
+					);
+					if (!parsedInlineConditional.ok) {
+						this.renderInlineSyntaxError(code as HTMLElement, parsedInlineConditional.message);
+						continue;
+					}
+
+					const span = document.createElement('span');
+					code.replaceWith(span);
+					this.registerDynamicRender(span, {
+						sourcePath: context.sourcePath,
+						kind: 'inline-conditional',
+						condition: parsedInlineConditional.value.condition,
+						rawContent: parsedInlineConditional.value.visibleText,
+						hiddenTextOverride: parsedInlineConditional.value.hiddenTextOverride,
+						style: activeStyle,
+					});
+					this.refreshDynamicRender(span);
+					continue;
+				}
+
 				const regex = new RegExp(`^${escapeRegex(id)}(?:-([a-z-]+))?(:)?\\s*([\\s\\S]*)$`);
 				const match = text.match(regex);
 				if (!match) continue;
@@ -210,15 +276,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 				const inlineStyle = match[1];
 				const hasColon = !!match[2];
 				const expressionRaw = match[3].trim();
-
-				let activeStyle = this.settings.hiddenStyle;
-				if (inlineStyle) {
-					if (styles.includes(inlineStyle as CRHiddenStyle)) {
-						activeStyle = inlineStyle as CRHiddenStyle;
-					} else if (SHORT_NAME_MAP[inlineStyle]) {
-						activeStyle = SHORT_NAME_MAP[inlineStyle];
-					}
-				}
+				const activeStyle = resolveHiddenStyleToken(inlineStyle) ?? this.settings.hiddenStyle;
 
 				const span = document.createElement('span');
 				code.replaceWith(span);
@@ -230,10 +288,12 @@ export default class ConditionalRenderPlugin extends Plugin {
 						expression: expressionRaw,
 					});
 				} else {
+					const parsedInlineDefault = this.parseInlineDefaultHiddenOverride(expressionRaw, activeStyle);
 					this.registerDynamicRender(span, {
 						sourcePath: context.sourcePath,
 						kind: 'inline-default',
-						rawContent: expressionRaw,
+						rawContent: parsedInlineDefault.visibleText,
+						hiddenTextOverride: parsedInlineDefault.hiddenTextOverride,
 						style: activeStyle,
 					});
 				}
@@ -297,7 +357,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			}
 
 			let activeStyle = this.settings.hiddenStyle;
-			if (overrideStyle) activeStyle = SHORT_NAME_MAP[overrideStyle] || overrideStyle;
+			if (overrideStyle) activeStyle = resolveHiddenStyleToken(overrideStyle) ?? overrideStyle;
 
 			const container = el.createDiv();
 			this.registerDynamicRender(container, {
@@ -320,7 +380,143 @@ export default class ConditionalRenderPlugin extends Plugin {
 		containerEl.empty();
 	}
 
-	private renderHiddenInlineInto(containerEl: HTMLElement, style: CRHiddenStyle, originalText: string, sourcePath: string) {
+	private applyTextHiddenVariantStyle(containerEl: HTMLElement, style: CRHiddenStyle) {
+		containerEl.style.color = '';
+		containerEl.style.backgroundImage = '';
+		containerEl.style.webkitBackgroundClip = '';
+		containerEl.style.backgroundClip = '';
+		containerEl.style.webkitTextFillColor = '';
+
+		switch (style) {
+			case 'text-red':
+				containerEl.style.color = 'var(--text-error, #e74c3c)';
+				break;
+			case 'text-blue':
+				containerEl.style.color = 'var(--text-accent, #4f8cff)';
+				break;
+			case 'text-green':
+				containerEl.style.color = 'var(--text-success, #2ecc71)';
+				break;
+			case 'text-white':
+				containerEl.style.color = '#ffffff';
+				break;
+			case 'text-yellow':
+				containerEl.style.color = '#f1c40f';
+				break;
+			case 'text-rainbow':
+				containerEl.style.backgroundImage = 'linear-gradient(90deg, #ff4d4f, #faad14, #52c41a, #1890ff, #722ed1)';
+				containerEl.style.webkitBackgroundClip = 'text';
+				containerEl.style.backgroundClip = 'text';
+				containerEl.style.webkitTextFillColor = 'transparent';
+				containerEl.style.color = 'transparent';
+				break;
+			default:
+				break;
+		}
+	}
+
+	private getHiddenReplacementText(overrideText?: string): string {
+		return overrideText && overrideText.trim() ? overrideText : this.settings.hiddenCustomText;
+	}
+
+	private parseInlineDefaultHiddenOverride(rawContent: string, style: CRHiddenStyle): { visibleText: string; hiddenTextOverride?: string } {
+		if (!isTextHiddenStyle(style)) return { visibleText: rawContent };
+		const segments = this.splitTopLevelPipe(rawContent, 2);
+		if (segments.length < 2) return { visibleText: rawContent };
+		return {
+			visibleText: segments[0].trim(),
+			hiddenTextOverride: segments[1].trim(),
+		};
+	}
+
+	private parseInlineConditionalSyntax(
+		raw: string,
+		allowHiddenOverride: boolean,
+	):
+		| { ok: true; value: { condition: string; visibleText: string; hiddenTextOverride?: string } }
+		| { ok: false; message: string } {
+		const segments = this.splitTopLevelPipe(raw, allowHiddenOverride ? 3 : 2).map((segment) => segment.trim());
+		if (segments.length < 2 || !segments[0] || !segments[1]) {
+			return { ok: false, message: `Invalid inline conditional syntax. Use ${this.settings.identifier}if: condition | text` };
+		}
+		const value: { condition: string; visibleText: string; hiddenTextOverride?: string } = {
+			condition: segments[0],
+			visibleText: segments[1],
+		};
+		if (allowHiddenOverride && segments[2]) {
+			value.hiddenTextOverride = segments[2];
+		}
+		return { ok: true, value };
+	}
+
+	private splitTopLevelPipe(input: string, maxParts = 3): string[] {
+		const parts: string[] = [];
+		let current = '';
+		let depth = 0;
+		let quote: '"' | "'" | null = null;
+		let escapeNext = false;
+
+		for (let index = 0; index < input.length; index += 1) {
+			const char = input[index];
+			const prev = index > 0 ? input[index - 1] : '';
+			const next = index + 1 < input.length ? input[index + 1] : '';
+
+			if (escapeNext) {
+				current += char;
+				escapeNext = false;
+				continue;
+			}
+			if (char === '\\') {
+				current += char;
+				escapeNext = true;
+				continue;
+			}
+			if (quote) {
+				current += char;
+				if (char === quote) quote = null;
+				continue;
+			}
+			if (char === '"' || char === "'") {
+				quote = char as '"' | "'";
+				current += char;
+				continue;
+			}
+			if (char === '(') {
+				depth += 1;
+				current += char;
+				continue;
+			}
+			if (char === ')') {
+				depth = Math.max(0, depth - 1);
+				current += char;
+				continue;
+			}
+			if (char === '|' && prev !== '|' && next !== '|' && depth === 0 && parts.length < maxParts - 1) {
+				parts.push(current);
+				current = '';
+				continue;
+			}
+			current += char;
+		}
+
+		parts.push(current);
+		return parts;
+	}
+
+	private renderInlineSyntaxError(codeEl: HTMLElement, message: string) {
+		const span = document.createElement('span');
+		span.addClass('cr-hidden-text-grey');
+		span.textContent = `⚠ CR Syntax Error: ${message}`;
+		codeEl.replaceWith(span);
+	}
+
+	private renderHiddenInlineInto(
+		containerEl: HTMLElement,
+		style: CRHiddenStyle,
+		originalText: string,
+		sourcePath: string,
+		hiddenTextOverride?: string,
+	) {
 		this.clearDynamicContainer(containerEl);
 
 		if (style === 'none') {
@@ -329,11 +525,12 @@ export default class ConditionalRenderPlugin extends Plugin {
 		}
 
 		containerEl.title = originalText;
-		if (style === 'text' || style === 'text-grey' || style === 'text-gray') {
-			containerEl.className = style === 'text' ? 'cr-hidden-text' : 'cr-hidden-text-grey';
-			MarkdownRenderer.renderMarkdown(this.settings.hiddenCustomText, containerEl, sourcePath, this).then(() => {
+		if (isTextHiddenStyle(style)) {
+			containerEl.className = style === 'text-grey' || style === 'text-gray' ? 'cr-hidden-text-grey' : 'cr-hidden-text';
+			MarkdownRenderer.renderMarkdown(this.getHiddenReplacementText(hiddenTextOverride), containerEl, sourcePath, this).then(() => {
 				const p = containerEl.querySelector('p');
 				if (p) containerEl.innerHTML = p.innerHTML;
+				this.applyTextHiddenVariantStyle(containerEl, style);
 			});
 			return;
 		}
@@ -342,7 +539,13 @@ export default class ConditionalRenderPlugin extends Plugin {
 		containerEl.textContent = originalText;
 	}
 
-	private renderHiddenBlockInto(containerEl: HTMLElement, style: CRHiddenStyle, originalMarkdown: string, sourcePath: string) {
+	private renderHiddenBlockInto(
+		containerEl: HTMLElement,
+		style: CRHiddenStyle,
+		originalMarkdown: string,
+		sourcePath: string,
+		hiddenTextOverride?: string,
+	) {
 		this.clearDynamicContainer(containerEl);
 
 		if (style === 'none') {
@@ -350,9 +553,11 @@ export default class ConditionalRenderPlugin extends Plugin {
 			return;
 		}
 
-		if (style === 'text' || style === 'text-grey' || style === 'text-gray') {
-			containerEl.className = style === 'text' ? 'cr-block-text' : 'cr-block-text-grey';
-			void MarkdownRenderer.renderMarkdown(this.settings.hiddenCustomText, containerEl, sourcePath, this);
+		if (isTextHiddenStyle(style)) {
+			containerEl.className = style === 'text-grey' || style === 'text-gray' ? 'cr-block-text-grey' : 'cr-block-text';
+			void MarkdownRenderer.renderMarkdown(this.getHiddenReplacementText(hiddenTextOverride), containerEl, sourcePath, this).then(() => {
+				this.applyTextHiddenVariantStyle(containerEl, style);
+			});
 			return;
 		}
 
@@ -411,7 +616,19 @@ export default class ConditionalRenderPlugin extends Plugin {
 				this.clearDynamicContainer(element);
 				element.textContent = content;
 			} else {
-				this.renderHiddenInlineInto(element, binding.style ?? this.settings.hiddenStyle, content, binding.sourcePath);
+				this.renderHiddenInlineInto(element, binding.style ?? this.settings.hiddenStyle, content, binding.sourcePath, binding.hiddenTextOverride);
+			}
+			return;
+		}
+
+		if (binding.kind === 'inline-conditional') {
+			const isTrue = !!this.evaluateExpression(binding.condition ?? 'true', binding.sourcePath);
+			const content = this.computeInlineDefaultContent(binding.rawContent ?? '', binding.sourcePath);
+			if (isTrue) {
+				this.clearDynamicContainer(element);
+				element.textContent = content;
+			} else {
+				this.renderHiddenInlineInto(element, binding.style ?? this.settings.hiddenStyle, content, binding.sourcePath, binding.hiddenTextOverride);
 			}
 			return;
 		}
@@ -433,7 +650,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			return;
 		}
 		if (shouldRenderHidden) {
-			this.renderHiddenBlockInto(element, binding.style ?? this.settings.hiddenStyle, targetContent, binding.sourcePath);
+			this.renderHiddenBlockInto(element, binding.style ?? this.settings.hiddenStyle, targetContent, binding.sourcePath, binding.hiddenTextOverride);
 		} else {
 			this.clearDynamicContainer(element);
 			void MarkdownRenderer.renderMarkdown(targetContent, element, binding.sourcePath, this);
