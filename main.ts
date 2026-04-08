@@ -1,17 +1,18 @@
 import {
 	App,
+	MarkdownPostProcessorContext,
+	MarkdownRenderChild,
+	MarkdownRenderer,
+	MarkdownView,
+	Notice,
 	Plugin,
 	PluginSettingTab,
 	Setting,
-	MarkdownRenderer,
-	setIcon,
-	ToggleComponent,
-	TextComponent,
-	TextAreaComponent,
 	TFile,
-	Notice,
-	MarkdownRenderChild,
-	MarkdownPostProcessorContext,
+	TextAreaComponent,
+	TextComponent,
+	ToggleComponent,
+	setIcon,
 } from 'obsidian';
 import { t } from './i18n';
 
@@ -33,6 +34,9 @@ export type CRHiddenStyle =
 	| 'spoiler-round'
 	| 'spoiler-white-round';
 
+type CRInputValueType = 'string' | 'number' | 'boolean';
+type CRInputSyntaxMode = 'typed' | 'legacy';
+
 interface ConditionalRenderSettings {
 	identifier: string;
 	hiddenStyle: CRHiddenStyle;
@@ -41,26 +45,25 @@ interface ConditionalRenderSettings {
 	variables: CRVariable[];
 }
 
-interface SyncOptions {
-	force?: boolean;
-	skipDirtyTextInput?: boolean;
+interface ParsedInputSpec {
+	mode: CRInputSyntaxMode;
+	raw: string;
+	target: string;
+	targetKind: 'yaml' | 'global';
+	explicitType?: CRInputValueType;
+	options: Record<string, string | number | boolean>;
 }
 
-const PLUGIN_VERSION = '0.13.4';
-const INPUT_COMMIT_DELAY = 180;
-const FRONTMATTER_SYNC_DELAYS = [0, 50, 150, 350, 800] as const;
-const SUPPORTED_STYLES: CRHiddenStyle[] = [
-	'none',
-	'text',
-	'text-grey',
-	'text-gray',
-	'underline',
-	'blank',
-	'spoiler',
-	'spoiler-white',
-	'spoiler-round',
-	'spoiler-white-round',
-];
+interface InputBinding {
+	sourcePath: string;
+	spec: ParsedInputSpec;
+}
+
+interface InputState {
+	isEditing: boolean;
+	isComposing: boolean;
+	pendingCommitTimer: number | null;
+}
 
 const DEFAULT_SETTINGS: ConditionalRenderSettings = {
 	identifier: 'cr',
@@ -85,47 +88,16 @@ const SHORT_NAME_MAP: Record<string, CRHiddenStyle> = {
 	spwr: 'spoiler-white-round',
 };
 
-const isValidVarName = (name: string) => {
-	if (!/^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(name)) return false;
-	try {
-		new Function(`let ${name};`);
-		return true;
-	} catch {
-		return false;
-	}
+const INPUT_TYPE_ALIASES: Record<string, CRInputValueType> = {
+	bool: 'boolean',
+	boolean: 'boolean',
+	string: 'string',
+	number: 'number',
 };
+
+const isValidVarName = (name: string) => /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(name);
 const isValidIdentifier = (name: string) => /^[a-zA-Z0-9_-]+$/.test(name);
-const escapeRegExp = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-
-function normalizeVariable(candidate: unknown, index: number): CRVariable | null {
-	if (!candidate || typeof candidate !== 'object') return null;
-
-	const raw = candidate as Partial<CRVariable>;
-	const name = typeof raw.name === 'string' && isValidVarName(raw.name)
-		? raw.name
-		: `var_${index + 1}`;
-
-	const type: CRVariable['type'] =
-		raw.type === 'number' || raw.type === 'boolean' || raw.type === 'string'
-			? raw.type
-			: 'string';
-
-	let value = raw.value;
-	if (type === 'boolean') {
-		value = String(value === true || value === 'true');
-	} else if (type === 'number') {
-		const numeric = Number(value);
-		value = Number.isFinite(numeric) ? String(numeric) : '0';
-	} else {
-		value = value ?? '';
-	}
-
-	return {
-		name,
-		type,
-		value: String(value),
-	};
-}
+const escapeRegex = (value: string) => value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 class CRInputChild extends MarkdownRenderChild {
 	constructor(
@@ -137,155 +109,92 @@ class CRInputChild extends MarkdownRenderChild {
 	}
 
 	onload() {
-		this.plugin.scheduleSingleInputSync(this.inputEl);
+		this.plugin.scheduleSyncForInput(this.inputEl, { immediate: true, delayed: true });
 	}
 }
 
 export default class ConditionalRenderPlugin extends Plugin {
-	settings: ConditionalRenderSettings;
-
-	private inputCommitTimers = new WeakMap<HTMLInputElement, number>();
-	private inputDirtyState = new WeakMap<HTMLInputElement, boolean>();
-	private inputComposingState = new WeakMap<HTMLInputElement, boolean>();
-	private pendingFileSyncTimers = new Map<string, number[]>();
+	settings!: ConditionalRenderSettings;
+	private readonly inputBindings = new WeakMap<HTMLInputElement, InputBinding>();
+	private readonly inputStates = new WeakMap<HTMLInputElement, InputState>();
+	private refreshTimer: number | null = null;
 
 	async onload() {
 		await this.loadSettings();
 		this.addSettingTab(new CRSettingTab(this.app, this));
-		console.log(t('log_loaded').replace('0.12.0', PLUGIN_VERSION));
+		console.log(t('log_loaded').replace('0.12.0', '0.14.0'));
 
 		this.registerProcessors();
 
 		this.registerEvent(
 			this.app.metadataCache.on('changed', (file) => {
-				this.handleMetadataChanged(file.path);
+				this.scheduleSyncByPath(file.path);
 			}),
 		);
+
 		this.registerEvent(
 			this.app.vault.on('modify', (file) => {
 				if (file instanceof TFile && file.extension === 'md') {
-					this.handleVaultModified(file.path);
+					this.scheduleSyncByPath(file.path);
 				}
 			}),
 		);
 	}
 
 	onunload() {
-
-		for (const timers of this.pendingFileSyncTimers.values()) {
-			timers.forEach((timerId) => window.clearTimeout(timerId));
-		}
-		this.pendingFileSyncTimers.clear();
-
 		console.log(t('log_unloaded'));
-	}
-
-	private handleMetadataChanged(path: string) {
-		this.syncAllInputs(path, { skipDirtyTextInput: true });
-		this.scheduleInputSync(path);
-	}
-
-	private handleVaultModified(path: string) {
-		this.scheduleInputSync(path);
-	}
-
-	private setInputDirty(inputEl: HTMLInputElement, isDirty: boolean) {
-		this.inputDirtyState.set(inputEl, isDirty);
-	}
-
-	private isInputDirty(inputEl: HTMLInputElement): boolean {
-		return this.inputDirtyState.get(inputEl) === true;
-	}
-
-	private setInputComposing(inputEl: HTMLInputElement, isComposing: boolean) {
-		this.inputComposingState.set(inputEl, isComposing);
-	}
-
-	private isInputComposing(inputEl: HTMLInputElement): boolean {
-		return this.inputComposingState.get(inputEl) === true;
-	}
-
-	private isTextLikeInput(inputEl: HTMLInputElement): boolean {
-		return inputEl.type !== 'checkbox';
-	}
-
-	private scheduleInputSync(path: string) {
-		const existing = this.pendingFileSyncTimers.get(path);
-		if (existing) {
-			existing.forEach((timerId) => window.clearTimeout(timerId));
-		}
-
-		const timers: number[] = [];
-		for (const delay of FRONTMATTER_SYNC_DELAYS) {
-			let timerId = 0;
-			timerId = window.setTimeout(() => {
-				this.syncAllInputs(path, { skipDirtyTextInput: true });
-
-				const current = this.pendingFileSyncTimers.get(path);
-				if (!current) return;
-				const index = current.indexOf(timerId);
-				if (index > -1) current.splice(index, 1);
-				if (current.length === 0) this.pendingFileSyncTimers.delete(path);
-			}, delay);
-			timers.push(timerId);
-		}
-
-		this.pendingFileSyncTimers.set(path, timers);
-	}
-	scheduleSingleInputSync(inputEl: HTMLInputElement) {
-		for (const delay of FRONTMATTER_SYNC_DELAYS) {
-			window.setTimeout(() => {
-				if (inputEl.isConnected) {
-					this.syncSingleInput(inputEl, undefined, { skipDirtyTextInput: true });
-				}
-			}, delay);
-		}
 	}
 
 	getDefaultVariable(): string {
 		const defaultVar = this.settings.defaultVariable;
-		if (defaultVar && this.settings.variables.some((variable) => variable.name === defaultVar)) {
+		if (defaultVar && this.settings.variables.some((v) => v.name === defaultVar)) {
 			return defaultVar;
 		}
 		return this.settings.variables.length > 0 ? this.settings.variables[0].name : 'true';
 	}
 
-	isDuplicateVarName(name: string, excludeIndex?: number): boolean {
-		return this.settings.variables.some((variable, index) => index !== excludeIndex && variable.name === name);
-	}
-
 	registerProcessors() {
-		const identifier = escapeRegExp(this.settings.identifier);
+		const id = this.settings.identifier;
+		const styles: CRHiddenStyle[] = [
+			'none',
+			'text',
+			'text-grey',
+			'text-gray',
+			'underline',
+			'blank',
+			'spoiler',
+			'spoiler-white',
+			'spoiler-round',
+			'spoiler-white-round',
+		];
 
-		this.registerCodeBlock(this.settings.identifier, null);
-		SUPPORTED_STYLES.forEach((style) => this.registerCodeBlock(`${this.settings.identifier}-${style}`, style));
-		Object.entries(SHORT_NAME_MAP).forEach(([shortName, fullStyle]) => {
-			this.registerCodeBlock(`${this.settings.identifier}-${shortName}`, fullStyle);
-		});
+		this.registerCodeBlock(id, null);
+		styles.forEach((style) => this.registerCodeBlock(`${id}-${style}`, style));
+		Object.entries(SHORT_NAME_MAP).forEach(([short, full]) => this.registerCodeBlock(`${id}-${short}`, full));
 
 		this.registerMarkdownPostProcessor((element, context) => {
-			const codeBlocks = element.findAll('code');
-			const regex = new RegExp(`^${identifier}(?:-([a-z-]+))?(:)?\\s*(.*)$`, 's');
+			const codeBlocks = Array.from(element.querySelectorAll('code'));
 
 			for (const code of codeBlocks) {
 				if (code.parentElement?.tagName === 'PRE') continue;
+				const text = code.innerText.trim();
+				if (!text) continue;
 
-				const text = code.textContent?.trim() ?? '';
+				if (this.tryRenderInteractiveInput(code as HTMLElement, text, context)) {
+					continue;
+				}
+
+				const regex = new RegExp(`^${escapeRegex(id)}(?:-([a-z-]+))?(:)?\\s*([\\s\\S]*)$`);
 				const match = text.match(regex);
 				if (!match) continue;
 
 				const inlineStyle = match[1];
-				const hasColon = Boolean(match[2]);
+				const hasColon = !!match[2];
 				const expressionRaw = match[3].trim();
-
-				if (inlineStyle === 'input') {
-					this.renderInteractiveInput(code, expressionRaw, context.sourcePath, context);
-					continue;
-				}
 
 				let activeStyle = this.settings.hiddenStyle;
 				if (inlineStyle) {
-					if (SUPPORTED_STYLES.includes(inlineStyle as CRHiddenStyle)) {
+					if (styles.includes(inlineStyle as CRHiddenStyle)) {
 						activeStyle = inlineStyle as CRHiddenStyle;
 					} else if (SHORT_NAME_MAP[inlineStyle]) {
 						activeStyle = SHORT_NAME_MAP[inlineStyle];
@@ -294,7 +203,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 				if (hasColon) {
 					const result = this.evaluateExpression(expressionRaw, context.sourcePath);
-					code.replaceWith(document.createTextNode(result !== undefined ? String(result) : `[Error: ${expressionRaw}]`));
+					code.replaceWith(result !== undefined ? String(result) : `[Error: ${expressionRaw}]`);
 					continue;
 				}
 
@@ -308,15 +217,32 @@ export default class ConditionalRenderPlugin extends Plugin {
 				}
 
 				const defaultVar = this.getDefaultVariable();
-				const isTrue = Boolean(this.evaluateExpression(defaultVar, context.sourcePath));
-
+				const isTrue = !!this.evaluateExpression(defaultVar, context.sourcePath);
 				if (isTrue) {
-					code.replaceWith(document.createTextNode(content));
+					code.replaceWith(content);
 				} else {
-					this.renderHiddenInline(code, activeStyle, content, context.sourcePath);
+					this.renderHiddenInline(code as HTMLElement, activeStyle, content, context.sourcePath);
 				}
 			}
 		});
+	}
+
+	private tryRenderInteractiveInput(codeEl: HTMLElement, text: string, context: MarkdownPostProcessorContext): boolean {
+		const prefix = `${this.settings.identifier}-input`;
+		if (!text.startsWith(prefix)) return false;
+
+		const remainder = text.slice(prefix.length);
+		const isTypedSyntax = remainder.trimStart().startsWith(':');
+		const rawSpec = isTypedSyntax ? remainder.trimStart().slice(1).trim() : remainder.trim();
+		const parsed = this.parseInputSpec(rawSpec, isTypedSyntax ? 'typed' : 'legacy');
+
+		if (!parsed.ok) {
+			this.renderInputError(codeEl, parsed.message);
+			return true;
+		}
+
+		this.renderInteractiveInput(codeEl, parsed.value, context);
+		return true;
 	}
 
 	registerCodeBlock(lang: string, overrideStyle: CRHiddenStyle | null) {
@@ -337,7 +263,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			for (const line of lines) {
 				const trimmed = line.trim();
 				if (trimmed.startsWith(ifPrefix)) {
-					condition = trimmed.substring(ifPrefix.length).trim();
+					condition = trimmed.slice(ifPrefix.length).trim();
 					hasIf = true;
 				} else if (trimmed.startsWith(elsePrefix)) {
 					currentMode = 'false';
@@ -355,12 +281,12 @@ export default class ConditionalRenderPlugin extends Plugin {
 				condition = 'true';
 			}
 
-			const isTrue = Boolean(this.evaluateExpression(condition, ctx.sourcePath));
-			const activeStyle = overrideStyle ?? this.settings.hiddenStyle;
+			const isTrue = this.evaluateExpression(condition, ctx.sourcePath);
+			let activeStyle = this.settings.hiddenStyle;
+			if (overrideStyle) activeStyle = SHORT_NAME_MAP[overrideStyle] || overrideStyle;
 
 			let targetContent = '';
 			let shouldRenderHidden = false;
-
 			if (isTrue) {
 				targetContent = trueContent.join('\n');
 			} else if (hasElse) {
@@ -371,7 +297,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			}
 
 			targetContent = this.replaceVariables(targetContent, ctx.sourcePath);
-			if (targetContent.trim() === '') return;
+			if (!targetContent.trim()) return;
 
 			if (shouldRenderHidden) {
 				this.renderHiddenBlock(el, activeStyle, targetContent, ctx.sourcePath);
@@ -383,7 +309,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 	renderHiddenInline(codeEl: HTMLElement, style: CRHiddenStyle, originalText: string, sourcePath: string) {
 		if (style === 'none') {
-			codeEl.replaceWith(document.createTextNode(''));
+			codeEl.replaceWith('');
 			return;
 		}
 
@@ -405,10 +331,9 @@ export default class ConditionalRenderPlugin extends Plugin {
 	}
 
 	renderHiddenBlock(containerEl: HTMLElement, style: CRHiddenStyle, originalMarkdown: string, sourcePath: string) {
-		containerEl.empty();
 		if (style === 'none') return;
-
 		const wrapper = containerEl.createDiv();
+
 		if (style === 'text' || style === 'text-grey' || style === 'text-gray') {
 			wrapper.className = style === 'text' ? 'cr-block-text' : 'cr-block-text-grey';
 			MarkdownRenderer.renderMarkdown(this.settings.hiddenCustomText, wrapper, sourcePath, this);
@@ -419,254 +344,483 @@ export default class ConditionalRenderPlugin extends Plugin {
 		MarkdownRenderer.renderMarkdown(originalMarkdown, wrapper, sourcePath, this);
 	}
 
-	renderInteractiveInput(
-		codeEl: HTMLElement,
-		varName: string,
-		sourcePath: string,
-		context: MarkdownPostProcessorContext,
-	) {
-		const cleanVarName = varName.trim();
+	private renderInputError(codeEl: HTMLElement, message: string) {
 		const span = document.createElement('span');
-		const inputEl = document.createElement('input');
-		inputEl.className = 'cr-interactive-input';
-		inputEl.dataset.crVar = cleanVarName;
-		inputEl.dataset.crSource = sourcePath;
-		inputEl.setAttribute('aria-label', cleanVarName);
-
-		span.appendChild(inputEl);
+		span.addClass('cr-hidden-text-grey');
+		span.textContent = `⚠ CR Input Error: ${message}`;
 		codeEl.replaceWith(span);
-
-		this.setInputDirty(inputEl, false);
-		this.setInputComposing(inputEl, false);
-		this.setupInputListeners(inputEl, cleanVarName, sourcePath);
-
-		const child = new CRInputChild(span, inputEl, this);
-		context.addChild(child);
-
-		this.scheduleSingleInputSync(inputEl);
 	}
 
-	private async commitInputChange(inputEl: HTMLInputElement, varName: string, sourcePath: string) {
-		const isYaml = varName.startsWith('this.');
-		const parsed = this.readTypedInputValue(inputEl);
-		if (parsed === undefined) return;
+	private parseInputSpec(
+		rawSpec: string,
+		mode: CRInputSyntaxMode,
+	): { ok: true; value: ParsedInputSpec } | { ok: false; message: string } {
+		const raw = rawSpec.trim();
+		if (!raw) {
+			return { ok: false, message: 'Empty input target. Example: cr-input: bool(this.done)' };
+		}
 
-		if (isYaml) {
-			const yamlKey = varName.substring(5).trim();
-			const file = this.app.vault.getAbstractFileByPath(sourcePath);
-			if (!(file instanceof TFile)) return;
+		if (mode === 'legacy') {
+			const target = raw;
+			const targetKind = this.getTargetKind(target);
+			if (!targetKind) {
+				return { ok: false, message: `Invalid legacy target "${target}". Use a variable name or this.key` };
+			}
+			return {
+				ok: true,
+				value: {
+					mode,
+					raw,
+					target,
+					targetKind,
+					options: {},
+				},
+			};
+		}
 
-			const currentValue = this.getFrontmatter(sourcePath)[yamlKey];
-			if (currentValue === parsed) {
-				this.scheduleInputSync(sourcePath);
-				return;
+		const typedMatch = raw.match(/^([a-zA-Z]+)\s*\((.*)\)$/s);
+		if (!typedMatch) {
+			return {
+				ok: false,
+				message: 'Invalid typed syntax. Use cr-input: bool(name) / string(name) / number(this.score)',
+			};
+		}
+
+		const rawType = typedMatch[1].toLowerCase();
+		const explicitType = INPUT_TYPE_ALIASES[rawType];
+		if (!explicitType) {
+			return {
+				ok: false,
+				message: `Unsupported input type "${rawType}". Allowed: bool, string, number`,
+			};
+		}
+
+		const inner = typedMatch[2].trim();
+		const items = this.splitTopLevelComma(inner);
+		if (items.length === 0 || !items[0]?.trim()) {
+			return { ok: false, message: 'Missing target inside typed input. Example: bool(this.done)' };
+		}
+
+		const target = items[0].trim();
+		const targetKind = this.getTargetKind(target);
+		if (!targetKind) {
+			return { ok: false, message: `Invalid target "${target}". Use a variable name or this.key` };
+		}
+
+		const options: Record<string, string | number | boolean> = {};
+		for (const rawOption of items.slice(1)) {
+			const option = rawOption.trim();
+			if (!option) continue;
+			const eqIndex = option.indexOf('=');
+			if (eqIndex <= 0) {
+				return { ok: false, message: `Invalid option "${option}". Use key=value` };
+			}
+			const key = option.slice(0, eqIndex).trim();
+			const valueText = option.slice(eqIndex + 1).trim();
+			if (!/^[a-zA-Z_][a-zA-Z0-9_-]*$/.test(key)) {
+				return { ok: false, message: `Invalid option key "${key}"` };
+			}
+			options[key] = this.parseOptionValue(valueText);
+		}
+
+		return {
+			ok: true,
+			value: {
+				mode,
+				raw,
+				target,
+				targetKind,
+				explicitType,
+				options,
+			},
+		};
+	}
+
+	private getTargetKind(target: string): 'yaml' | 'global' | null {
+		if (target.startsWith('this.') && target.length > 5) return 'yaml';
+		if (isValidVarName(target)) return 'global';
+		return null;
+	}
+
+	private splitTopLevelComma(input: string): string[] {
+		const result: string[] = [];
+		let current = '';
+		let depth = 0;
+		let quote: '"' | "'" | null = null;
+		let escapeNext = false;
+
+		for (const char of input) {
+			if (escapeNext) {
+				current += char;
+				escapeNext = false;
+				continue;
+			}
+			if (char === '\\') {
+				current += char;
+				escapeNext = true;
+				continue;
+			}
+			if (quote) {
+				current += char;
+				if (char === quote) quote = null;
+				continue;
+			}
+			if (char === '"' || char === "'") {
+				quote = char;
+				current += char;
+				continue;
+			}
+			if (char === '(') {
+				depth += 1;
+				current += char;
+				continue;
+			}
+			if (char === ')') {
+				depth = Math.max(0, depth - 1);
+				current += char;
+				continue;
+			}
+			if (char === ',' && depth === 0) {
+				result.push(current);
+				current = '';
+				continue;
+			}
+			current += char;
+		}
+
+		if (current) result.push(current);
+		return result.map((item) => item.trim()).filter(Boolean);
+	}
+
+	private parseOptionValue(raw: string): string | number | boolean {
+		const trimmed = raw.trim();
+		if (/^(true|false)$/i.test(trimmed)) return trimmed.toLowerCase() === 'true';
+		if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
+		const quoted = trimmed.match(/^(["'])([\s\S]*)\1$/);
+		if (quoted) return quoted[2];
+		return trimmed;
+	}
+
+	private resolveInputBinding(binding: InputBinding):
+		| { ok: true; valueType: CRInputValueType; value: unknown; options: ParsedInputSpec['options'] }
+		| { ok: false; message: string } {
+		const { spec, sourcePath } = binding;
+
+		if (spec.targetKind === 'global') {
+			const globalVar = this.settings.variables.find((v) => v.name === spec.target);
+			if (!globalVar) {
+				return { ok: false, message: `Global variable "${spec.target}" not found in settings` };
 			}
 
-			await this.app.fileManager.processFrontMatter(file, (frontmatter) => {
-				frontmatter[yamlKey] = parsed;
-			});
-			this.scheduleInputSync(sourcePath);
-			return;
+			if (spec.explicitType && spec.explicitType !== globalVar.type) {
+				return {
+					ok: false,
+					message: `Type mismatch for global variable "${spec.target}": settings=${globalVar.type}, input=${spec.explicitType}`,
+				};
+			}
+
+			const valueType = spec.explicitType ?? globalVar.type;
+			let value: unknown = globalVar.value;
+			if (valueType === 'boolean') value = globalVar.value === 'true';
+			else if (valueType === 'number') value = globalVar.value === '' ? '' : Number(globalVar.value);
+
+			return { ok: true, valueType, value, options: spec.options };
 		}
 
-		const globalVar = this.settings.variables.find((variable) => variable.name === varName);
-		if (!globalVar) return;
+		const yamlKey = spec.target.slice(5).trim();
+		const fm = this.getFrontmatter(sourcePath);
+		const currentValue = fm[yamlKey];
+		const inferredType: CRInputValueType =
+			typeof currentValue === 'boolean'
+				? 'boolean'
+				: typeof currentValue === 'number'
+					? 'number'
+					: 'string';
+		const valueType = spec.explicitType ?? inferredType;
 
-		const nextValue = String(parsed);
-		if (globalVar.value === nextValue) {
-			this.syncAllInputs(undefined, { skipDirtyTextInput: true });
-			return;
+		let value: unknown = currentValue;
+		if (value === undefined || value === null) {
+			value = valueType === 'boolean' ? false : '';
 		}
+		if (valueType === 'number' && typeof value === 'number' && !Number.isFinite(value)) value = '';
+		if (valueType === 'number' && typeof value === 'string') value = value.trim();
+		if (valueType === 'boolean' && typeof value !== 'boolean') value = value === true;
 
-		globalVar.value = nextValue;
-		await this.saveSettings();
+		return { ok: true, valueType, value, options: spec.options };
 	}
 
-	private scheduleInputCommit(inputEl: HTMLInputElement, varName: string, sourcePath: string) {
-		const existingTimer = this.inputCommitTimers.get(inputEl);
-		if (existingTimer !== undefined) {
-			window.clearTimeout(existingTimer);
-		}
+	private renderInteractiveInput(codeEl: HTMLElement, spec: ParsedInputSpec, context: MarkdownPostProcessorContext) {
+		const wrapper = document.createElement('span');
+		const inputEl = document.createElement('input');
+		inputEl.className = 'cr-interactive-input';
+		wrapper.appendChild(inputEl);
+		codeEl.replaceWith(wrapper);
 
-		const timer = window.setTimeout(() => {
-			this.inputCommitTimers.delete(inputEl);
-			void this.commitInputChange(inputEl, varName, sourcePath);
-		}, INPUT_COMMIT_DELAY);
-		this.inputCommitTimers.set(inputEl, timer);
+		const binding: InputBinding = {
+			sourcePath: context.sourcePath,
+			spec,
+		};
+		this.inputBindings.set(inputEl, binding);
+		this.inputStates.set(inputEl, { isEditing: false, isComposing: false, pendingCommitTimer: null });
+
+		this.setupInputListeners(inputEl);
+		context.addChild(new CRInputChild(wrapper, inputEl, this));
+		this.scheduleSyncForInput(inputEl, { immediate: true, delayed: true });
 	}
 
-	private async flushPendingInputCommit(inputEl: HTMLInputElement, varName: string, sourcePath: string) {
-		const existingTimer = this.inputCommitTimers.get(inputEl);
-		if (existingTimer !== undefined) {
-			window.clearTimeout(existingTimer);
-			this.inputCommitTimers.delete(inputEl);
-		}
-		await this.commitInputChange(inputEl, varName, sourcePath);
-	}
+	private setupInputListeners(inputEl: HTMLInputElement) {
+		inputEl.addEventListener('focus', () => {
+			const state = this.getInputState(inputEl);
+			state.isEditing = true;
+		});
 
-	setupInputListeners(inputEl: HTMLInputElement, cleanVarName: string, sourcePath: string) {
+		inputEl.addEventListener('blur', () => {
+			const state = this.getInputState(inputEl);
+			this.flushPendingCommit(inputEl);
+			state.isEditing = false;
+			state.isComposing = false;
+			this.scheduleSyncForInput(inputEl, { immediate: false, delayed: true });
+		});
+
 		inputEl.addEventListener('compositionstart', () => {
-			this.setInputComposing(inputEl, true);
-			this.setInputDirty(inputEl, true);
+			const state = this.getInputState(inputEl);
+			state.isEditing = true;
+			state.isComposing = true;
 		});
 
 		inputEl.addEventListener('compositionend', () => {
-			this.setInputComposing(inputEl, false);
-			if (this.isTextLikeInput(inputEl)) {
-				this.setInputDirty(inputEl, true);
-				this.scheduleInputCommit(inputEl, cleanVarName, sourcePath);
+			const state = this.getInputState(inputEl);
+			state.isComposing = false;
+			if (inputEl.type !== 'checkbox') {
+				this.scheduleCommit(inputEl);
 			}
 		});
 
 		inputEl.addEventListener('input', () => {
 			if (inputEl.type === 'checkbox') return;
-			this.setInputDirty(inputEl, true);
-			if (!this.isInputComposing(inputEl)) {
-				this.scheduleInputCommit(inputEl, cleanVarName, sourcePath);
-			}
+			this.scheduleCommit(inputEl);
 		});
 
 		inputEl.addEventListener('change', () => {
 			if (inputEl.type === 'checkbox') {
-				void this.flushPendingInputCommit(inputEl, cleanVarName, sourcePath);
-				return;
-			}
-			this.setInputDirty(inputEl, true);
-			if (!this.isInputComposing(inputEl)) {
-				this.scheduleInputCommit(inputEl, cleanVarName, sourcePath);
+				void this.commitInputValue(inputEl);
+			} else {
+				this.scheduleCommit(inputEl);
 			}
 		});
 
-		inputEl.addEventListener('blur', () => {
-			void (async () => {
-				this.setInputComposing(inputEl, false);
-				await this.flushPendingInputCommit(inputEl, cleanVarName, sourcePath);
-				this.setInputDirty(inputEl, false);
-				this.scheduleSingleInputSync(inputEl);
-			})();
-		});
-
-		inputEl.addEventListener('focus', () => {
-			this.setInputComposing(inputEl, false);
-			if (this.isTextLikeInput(inputEl)) {
-				this.setInputDirty(inputEl, false);
+		inputEl.addEventListener('keydown', (event) => {
+			event.stopPropagation();
+			if (event.key === 'Enter' && inputEl.type !== 'checkbox') {
+				inputEl.blur();
 			}
 		});
-
-		inputEl.addEventListener('keyup', (event) => {
-			if (event.key === 'Enter') inputEl.blur();
-		});
-
 		inputEl.addEventListener('click', (event) => event.stopPropagation());
-		inputEl.addEventListener('keydown', (event) => event.stopPropagation());
 	}
 
-	private readTypedInputValue(inputEl: HTMLInputElement): string | number | boolean | undefined {
-		if (inputEl.type === 'checkbox') return inputEl.checked;
-		if (inputEl.type === 'number') {
-			const trimmed = inputEl.value.trim();
-			if (trimmed === '') return undefined;
-			const parsed = Number(trimmed);
-			return Number.isFinite(parsed) ? parsed : undefined;
+	private getInputState(inputEl: HTMLInputElement): InputState {
+		let state = this.inputStates.get(inputEl);
+		if (!state) {
+			state = { isEditing: false, isComposing: false, pendingCommitTimer: null };
+			this.inputStates.set(inputEl, state);
 		}
-		return inputEl.value;
+		return state;
 	}
 
-	syncSingleInput(inputEl: HTMLInputElement, changedPath?: string, options: SyncOptions = {}) {
-		const varName = inputEl.dataset.crVar;
-		const sourcePath = inputEl.dataset.crSource;
-		if (!varName) return;
+	private isTextLikeInput(inputEl: HTMLInputElement) {
+		return inputEl.type === 'text' || inputEl.type === 'number';
+	}
 
-		if (changedPath && varName.startsWith('this.') && sourcePath !== changedPath) {
-			return;
+	private scheduleCommit(inputEl: HTMLInputElement) {
+		const state = this.getInputState(inputEl);
+		if (state.isComposing) return;
+		if (state.pendingCommitTimer) window.clearTimeout(state.pendingCommitTimer);
+
+		const debounce = this.getInputDebounce(inputEl);
+		state.pendingCommitTimer = window.setTimeout(() => {
+			state.pendingCommitTimer = null;
+			void this.commitInputValue(inputEl);
+		}, debounce);
+	}
+
+	private flushPendingCommit(inputEl: HTMLInputElement) {
+		const state = this.getInputState(inputEl);
+		if (state.pendingCommitTimer) {
+			window.clearTimeout(state.pendingCommitTimer);
+			state.pendingCommitTimer = null;
+			void this.commitInputValue(inputEl);
 		}
+	}
 
-		const isActive = document.activeElement === inputEl;
-		const shouldProtectDirtyText =
-			options.skipDirtyTextInput === true &&
-			this.isTextLikeInput(inputEl) &&
-			(isActive || this.isInputDirty(inputEl) || this.isInputComposing(inputEl));
+	private getInputDebounce(inputEl: HTMLInputElement): number {
+		const binding = this.inputBindings.get(inputEl);
+		const optionValue = binding?.spec.options.debounce;
+		return typeof optionValue === 'number' && Number.isFinite(optionValue) && optionValue >= 0 ? optionValue : 250;
+	}
 
-		if (shouldProtectDirtyText) {
-			return;
-		}
+	private async commitInputValue(inputEl: HTMLInputElement) {
+		const binding = this.inputBindings.get(inputEl);
+		if (!binding) return;
 
-		if (!options.force && isActive) {
-			return;
-		}
+		const resolved = this.resolveInputBinding(binding);
+		if (!resolved.ok) return;
 
-		let newValue: string | number | boolean | undefined = '';
-		let varType: CRVariable['type'] = 'string';
-
-		if (varName.startsWith('this.')) {
-			const yamlKey = varName.substring(5).trim();
-			const frontmatter = this.getFrontmatter(sourcePath || '');
-			newValue = frontmatter[yamlKey];
-			if (typeof newValue === 'boolean') varType = 'boolean';
-			else if (typeof newValue === 'number') varType = 'number';
-			else newValue = newValue !== undefined ? String(newValue) : '';
-		} else {
-			const globalVar = this.settings.variables.find((variable) => variable.name === varName.trim());
-			if (globalVar) {
-				varType = globalVar.type;
-				if (varType === 'boolean') newValue = globalVar.value === 'true';
-				else if (varType === 'number') newValue = Number(globalVar.value);
-				else newValue = globalVar.value;
+		const valueType = resolved.valueType;
+		let newValue: string | number | boolean;
+		if (valueType === 'boolean') {
+			newValue = inputEl.checked;
+		} else if (valueType === 'number') {
+			const raw = inputEl.value.trim();
+			if (raw === '') {
+				newValue = '';
+			} else {
+				const parsed = Number(raw);
+				if (Number.isNaN(parsed)) return;
+				newValue = parsed;
 			}
+		} else {
+			newValue = inputEl.value;
 		}
 
-		if (varType === 'boolean' && inputEl.type !== 'checkbox') {
-			inputEl.type = 'checkbox';
-		} else if (varType === 'number' && inputEl.type !== 'number') {
-			inputEl.type = 'number';
-		} else if (varType === 'string' && inputEl.type !== 'text') {
-			inputEl.type = 'text';
-		}
+		if (binding.spec.targetKind === 'yaml') {
+			const yamlKey = binding.spec.target.slice(5).trim();
+			const file = this.app.vault.getAbstractFileByPath(binding.sourcePath);
+			if (!(file instanceof TFile)) return;
 
-		if (inputEl.type === 'checkbox') {
-			const nextValue = Boolean(newValue);
-			if (inputEl.checked !== nextValue) inputEl.checked = nextValue;
+			await this.app.fileManager.processFrontMatter(file, (fm) => {
+				fm[yamlKey] = newValue;
+			});
+			this.scheduleSyncByPath(binding.sourcePath);
 			return;
 		}
 
-		const strVal = newValue !== undefined && newValue !== null ? String(newValue) : '';
-		if (inputEl.value !== strVal) inputEl.value = strVal;
-		if (document.activeElement !== inputEl) {
-			this.setInputDirty(inputEl, false);
+		const targetVar = this.settings.variables.find((v) => v.name === binding.spec.target);
+		if (!targetVar) return;
+		if (targetVar.type !== valueType) return;
+
+		targetVar.value = typeof newValue === 'boolean' ? String(newValue) : String(newValue);
+		await this.saveSettings({ refreshViews: false });
+		this.syncAllInputs(undefined, { skipActiveTextInputs: true });
+	}
+
+	scheduleSyncForInput(inputEl: HTMLInputElement, mode: { immediate: boolean; delayed: boolean }) {
+		if (mode.immediate) {
+			this.syncSingleInput(inputEl, undefined, { skipActiveTextInputs: true });
+		}
+		if (mode.delayed) {
+			window.setTimeout(() => this.syncSingleInput(inputEl, undefined, { skipActiveTextInputs: true }), 60);
+			window.setTimeout(() => this.syncSingleInput(inputEl, undefined, { skipActiveTextInputs: true }), 220);
+			window.setTimeout(() => this.syncSingleInput(inputEl, undefined, { skipActiveTextInputs: true }), 500);
 		}
 	}
 
-	syncAllInputs(changedPath?: string, options: SyncOptions = {}) {
+	scheduleSyncByPath(path: string) {
+		this.syncAllInputs(path, { skipActiveTextInputs: true });
+		window.setTimeout(() => this.syncAllInputs(path, { skipActiveTextInputs: true }), 60);
+		window.setTimeout(() => this.syncAllInputs(path, { skipActiveTextInputs: true }), 220);
+		window.setTimeout(() => this.syncAllInputs(path, { skipActiveTextInputs: true }), 500);
+	}
+
+	syncSingleInput(
+		inputEl: HTMLInputElement,
+		changedPath?: string,
+		options: { skipActiveTextInputs?: boolean } = {},
+	) {
+		const binding = this.inputBindings.get(inputEl);
+		if (!binding) return;
+		if (changedPath && binding.spec.targetKind === 'yaml' && binding.sourcePath !== changedPath) return;
+
+		const state = this.getInputState(inputEl);
+		if (options.skipActiveTextInputs && this.isTextLikeInput(inputEl)) {
+			if (state.isEditing || state.isComposing || state.pendingCommitTimer) return;
+		}
+
+		const resolved = this.resolveInputBinding(binding);
+		if (!resolved.ok) {
+			inputEl.type = 'text';
+			if (!options.skipActiveTextInputs || !state.isEditing) {
+				inputEl.value = `Error: ${resolved.message}`;
+			}
+			return;
+		}
+
+		const { valueType, value, options: inputOptions } = resolved;
+		const desiredType = valueType === 'boolean' ? 'checkbox' : valueType === 'number' ? 'number' : 'text';
+		if (inputEl.type !== desiredType) inputEl.type = desiredType;
+		this.applyInputOptions(inputEl, valueType, inputOptions);
+
+		if (desiredType === 'checkbox') {
+			const checked = !!value;
+			if (inputEl.checked !== checked) inputEl.checked = checked;
+			return;
+		}
+
+		const nextValue = value === undefined || value === null ? '' : String(value);
+		if (inputEl.value !== nextValue) inputEl.value = nextValue;
+	}
+
+	private applyInputOptions(
+		inputEl: HTMLInputElement,
+		valueType: CRInputValueType,
+		options: Record<string, string | number | boolean>,
+	) {
+		const placeholder = options.placeholder;
+		inputEl.placeholder = typeof placeholder === 'string' ? placeholder : '';
+
+		if (valueType === 'number') {
+			inputEl.min = typeof options.min === 'number' ? String(options.min) : '';
+			inputEl.max = typeof options.max === 'number' ? String(options.max) : '';
+			inputEl.step = typeof options.step === 'number' ? String(options.step) : '';
+		} else {
+			inputEl.removeAttribute('min');
+			inputEl.removeAttribute('max');
+			inputEl.removeAttribute('step');
+		}
+	}
+
+	syncAllInputs(changedPath?: string, options: { skipActiveTextInputs?: boolean } = {}) {
 		const inputs = document.querySelectorAll<HTMLInputElement>('.cr-interactive-input');
 		inputs.forEach((inputEl) => this.syncSingleInput(inputEl, changedPath, options));
 	}
 
+	private requestDebouncedRefresh() {
+		if (this.refreshTimer) window.clearTimeout(this.refreshTimer);
+		this.refreshTimer = window.setTimeout(() => {
+			this.refreshTimer = null;
+			this.refreshActiveViewsPreserveScroll();
+		}, 250);
+	}
+
+	private refreshActiveViewsPreserveScroll() {
+		this.app.workspace.getLeavesOfType('markdown').forEach((leaf) => {
+			if (!(leaf.view instanceof MarkdownView)) return;
+
+			const previewEl = leaf.view.containerEl.querySelector<HTMLElement>('.markdown-preview-view');
+			const scrollTop = previewEl?.scrollTop ?? null;
+			leaf.view.previewMode.rerender(true);
+			if (previewEl && scrollTop !== null) {
+				window.requestAnimationFrame(() => {
+					previewEl.scrollTop = scrollTop;
+					window.setTimeout(() => {
+						previewEl.scrollTop = scrollTop;
+					}, 60);
+				});
+			}
+		});
+	}
 
 	async loadSettings() {
-		const loaded = await this.loadData();
-		const loadedVariables = Array.isArray(loaded?.variables)
-			? loaded.variables.map((item: unknown, index: number) => normalizeVariable(item, index)).filter(Boolean) as CRVariable[]
-			: DEFAULT_SETTINGS.variables;
-
-		this.settings = {
-			...DEFAULT_SETTINGS,
-			...(loaded ?? {}),
-			variables: loadedVariables.length > 0 ? loadedVariables : DEFAULT_SETTINGS.variables,
-		};
-
-		if (!isValidIdentifier(this.settings.identifier)) {
-			this.settings.identifier = DEFAULT_SETTINGS.identifier;
-		}
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
 	}
 
-	async saveSettings() {
+	async saveSettings(options: { refreshViews?: boolean } = {}) {
 		await this.saveData(this.settings);
-		this.syncAllInputs(undefined, { skipDirtyTextInput: true });
+		this.syncAllInputs(undefined, { skipActiveTextInputs: true });
+		if (options.refreshViews) this.requestDebouncedRefresh();
 	}
 
-
-	buildContext(): Record<string, string | number | boolean> {
-		const ctx: Record<string, string | number | boolean> = {};
+	buildContext(): Record<string, unknown> {
+		const ctx: Record<string, unknown> = {};
 		for (const variable of this.settings.variables) {
 			if (variable.type === 'number') ctx[variable.name] = Number(variable.value);
 			else if (variable.type === 'boolean') ctx[variable.name] = variable.value === 'true';
@@ -691,7 +845,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		const frontmatter = this.getFrontmatter(sourcePath);
 
 		try {
-			const fn = new Function(...keys, `"use strict"; return (${expression});`);
+			const fn = new Function(...keys, `return ${expression}`);
 			return fn.apply(frontmatter, values);
 		} catch {
 			return undefined;
@@ -719,23 +873,22 @@ class CRSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl('h2', { text: t('settings_title').replace('0.12.0', PLUGIN_VERSION) });
+		containerEl.createEl('h2', { text: t('settings_title').replace('0.12.0', '0.14.0') });
 
 		new Setting(containerEl)
 			.setName(t('plugin_identifier_name'))
 			.setDesc(t('plugin_identifier_desc'))
 			.addText((text) => {
-				text
-					.setValue(this.plugin.settings.identifier)
-					.onChange(async (value) => {
-						const nextValue = value.trim() || 'cr';
-						const invalid = !isValidIdentifier(nextValue);
-						text.inputEl.parentElement?.toggleClass('cr-error-input', invalid);
-						if (invalid) return;
-
-						this.plugin.settings.identifier = nextValue;
-						await this.plugin.saveSettings();
-					});
+				text.setValue(this.plugin.settings.identifier).onChange(async (value) => {
+					const val = value.trim() || 'cr';
+					if (!isValidIdentifier(val)) {
+						text.inputEl.parentElement?.addClass('cr-error-input');
+						return;
+					}
+					text.inputEl.parentElement?.removeClass('cr-error-input');
+					this.plugin.settings.identifier = val;
+					await this.plugin.saveSettings({ refreshViews: true });
+				});
 			});
 
 		new Setting(containerEl)
@@ -756,22 +909,20 @@ class CRSettingTab extends PluginSettingTab {
 					.setValue(this.plugin.settings.hiddenStyle)
 					.onChange(async (value: CRHiddenStyle) => {
 						this.plugin.settings.hiddenStyle = value;
-						await this.plugin.saveSettings();
+						await this.plugin.saveSettings({ refreshViews: true });
 						this.display();
 					});
 			});
 
-		if (this.plugin.settings.hiddenStyle === 'text' || this.plugin.settings.hiddenStyle === 'text-grey' || this.plugin.settings.hiddenStyle === 'text-gray') {
+		if (this.plugin.settings.hiddenStyle === 'text' || this.plugin.settings.hiddenStyle === 'text-grey') {
 			new Setting(containerEl)
 				.setName(t('custom_text_name'))
 				.setDesc(t('custom_text_desc'))
 				.addTextArea((text) => {
-					text
-						.setValue(this.plugin.settings.hiddenCustomText)
-						.onChange(async (value) => {
-							this.plugin.settings.hiddenCustomText = value;
-							await this.plugin.saveSettings();
-						});
+					text.setValue(this.plugin.settings.hiddenCustomText).onChange(async (value) => {
+						this.plugin.settings.hiddenCustomText = value;
+						await this.plugin.saveSettings({ refreshViews: true });
+					});
 					text.inputEl.style.width = '100%';
 					text.inputEl.style.minHeight = '80px';
 					text.inputEl.style.resize = 'vertical';
@@ -782,54 +933,52 @@ class CRSettingTab extends PluginSettingTab {
 			.setName(t('legend_header_name'))
 			.setDesc(t('legend_header_desc'));
 
-		legendHeader.addButton((button) =>
-			button
-				.setButtonText(this.showShortNames ? t('btn_show_full') : t('btn_show_short'))
-				.onClick(() => {
-					this.showShortNames = !this.showShortNames;
-					this.display();
-				}),
+		legendHeader.addButton((btn) =>
+			btn.setButtonText(this.showShortNames ? t('btn_show_full') : t('btn_show_short')).onClick(() => {
+				this.showShortNames = !this.showShortNames;
+				this.display();
+			}),
 		);
 
 		const id = this.plugin.settings.identifier;
 		const getName = (full: string, short: string) => (this.showShortNames ? `${id}-${short}` : `${id}-${full}`);
-		const exampleText = t('legend_example_text');
-		const exampleInput = t('legend_custom_input');
+		const exText = t('legend_example_text');
+		const exInput = t('legend_custom_input');
 
 		const legendEl = containerEl.createDiv({ cls: 'cr-style-legend' });
 		legendEl.innerHTML = `
 			<div class="cr-legend-item"><code>${getName('none', 'n')}</code></div>
-			<div class="cr-legend-item"><code>${getName('underline', 'u')}</code> <span class="cr-hidden-underline" title="${exampleText}">${exampleText}</span></div>
-			<div class="cr-legend-item"><code>${getName('spoiler-white', 'spw')}</code> <span class="cr-hidden-spoiler-white" title="${exampleText}">${exampleText}</span></div>
-
-			<div class="cr-legend-item"><code>${getName('text', 't')}</code> <span class="cr-hidden-text">${exampleInput}</span></div>
-			<div class="cr-legend-item"><code>${getName('text-grey', 'tg')}</code> <span class="cr-hidden-text-grey">${exampleInput}</span></div>
-			<div class="cr-legend-item"><code>${getName('spoiler-white-round', 'spwr')}</code> <span class="cr-hidden-spoiler-white-round" title="${exampleText}">${exampleText}</span></div>
-
-			<div class="cr-legend-item"><code>${getName('blank', 'b')}</code> <span class="cr-hidden-blank" title="${exampleText}">${exampleText}</span></div>
-			<div class="cr-legend-item"><code>${getName('spoiler', 'sp')}</code> <span class="cr-hidden-spoiler" title="${exampleText}">${exampleText}</span></div>
-			<div class="cr-legend-item"><code>${getName('spoiler-round', 'spr')}</code> <span class="cr-hidden-spoiler-round" title="${exampleText}">${exampleText}</span></div>
+			<div class="cr-legend-item"><code>${getName('underline', 'u')}</code> <span class="cr-hidden-underline" title="${exText}">${exText}</span></div>
+			<div class="cr-legend-item"><code>${getName('spoiler-white', 'spw')}</code> <span class="cr-hidden-spoiler-white" title="${exText}">${exText}</span></div>
+			<div class="cr-legend-item"><code>${getName('text', 't')}</code> <span class="cr-hidden-text">${exInput}</span></div>
+			<div class="cr-legend-item"><code>${getName('text-grey', 'tg')}</code> <span class="cr-hidden-text-grey">${exInput}</span></div>
+			<div class="cr-legend-item"><code>${getName('spoiler-white-round', 'spwr')}</code> <span class="cr-hidden-spoiler-white-round" title="${exText}">${exText}</span></div>
+			<div class="cr-legend-item"><code>${getName('blank', 'b')}</code> <span class="cr-hidden-blank" title="${exText}">${exText}</span></div>
+			<div class="cr-legend-item"><code>${getName('spoiler', 'sp')}</code> <span class="cr-hidden-spoiler" title="${exText}">${exText}</span></div>
+			<div class="cr-legend-item"><code>${getName('spoiler-round', 'spr')}</code> <span class="cr-hidden-spoiler-round" title="${exText}">${exText}</span></div>
 		`;
 
-		containerEl.createEl('br');
+		containerEl.createEl('p', {
+			text: 'Typed input syntax: cr-input: bool(name) / string(name, placeholder="text") / number(this.score, min=0, max=100, step=1)',
+		});
+		containerEl.createEl('p', {
+			text: 'Legacy input syntax is still supported: cr-input name / cr-input this.status',
+		});
 
 		const variablesHeader = new Setting(containerEl)
 			.setName(t('variables_header_name'))
 			.setDesc(t('variables_header_desc'));
 
 		variablesHeader.addButton((button) =>
-			button
-				.setButtonText(t('btn_add_variable'))
-				.setCta()
-				.onClick(async () => {
-					this.plugin.settings.variables.push({
-						name: `var_${this.plugin.settings.variables.length + 1}`,
-						type: 'string',
-						value: '',
-					});
-					await this.plugin.saveSettings();
-					this.display();
-				}),
+			button.setButtonText(t('btn_add_variable')).setCta().onClick(async () => {
+				this.plugin.settings.variables.push({
+					name: `var_${this.plugin.settings.variables.length + 1}`,
+					type: 'string',
+					value: '',
+				});
+				await this.plugin.saveSettings();
+				this.display();
+			}),
 		);
 
 		this.plugin.settings.variables.forEach((variable, index) => {
@@ -837,22 +986,19 @@ class CRSettingTab extends PluginSettingTab {
 			variableRow.settingEl.addClass('cr-setting-row');
 
 			variableRow.settingEl.addEventListener('dragstart', (event) => {
-				event.dataTransfer?.setData('text/plain', index.toString());
+				event.dataTransfer?.setData('text/plain', String(index));
 			});
 			variableRow.settingEl.addEventListener('dragover', (event) => {
 				event.preventDefault();
 				variableRow.settingEl.addClass('cr-drag-over');
 			});
-			variableRow.settingEl.addEventListener('dragleave', () => {
-				variableRow.settingEl.removeClass('cr-drag-over');
-			});
+			variableRow.settingEl.addEventListener('dragleave', () => variableRow.settingEl.removeClass('cr-drag-over'));
 			variableRow.settingEl.addEventListener('drop', async (event) => {
 				event.preventDefault();
 				variableRow.settingEl.removeClass('cr-drag-over');
-				const draggedIndex = parseInt(event.dataTransfer?.getData('text/plain') || '-1', 10);
+				const draggedIndex = Number(event.dataTransfer?.getData('text/plain') ?? '-1');
 				if (draggedIndex < 0 || draggedIndex === index) return;
-
-				const item = this.plugin.settings.variables.splice(draggedIndex, 1)[0];
+				const [item] = this.plugin.settings.variables.splice(draggedIndex, 1);
 				this.plugin.settings.variables.splice(index, 0, item);
 				await this.plugin.saveSettings();
 				this.display();
@@ -872,18 +1018,17 @@ class CRSettingTab extends PluginSettingTab {
 			});
 
 			variableRow.addText((text) => {
-				text
-					.setPlaceholder(t('placeholder_name'))
-					.setValue(variable.name)
-					.onChange(async (value) => {
-						const nextValue = value.trim();
-						const invalid = !isValidVarName(nextValue) || this.plugin.isDuplicateVarName(nextValue, index);
-						text.inputEl.parentElement?.toggleClass('cr-error-input', invalid);
-						if (invalid) return;
-
-						variable.name = nextValue;
-						await this.plugin.saveSettings();
-					});
+				text.setPlaceholder(t('placeholder_name')).setValue(variable.name).onChange(async (value) => {
+					const trimmed = value.trim();
+					const duplicated = this.plugin.settings.variables.some((v, i) => i !== index && v.name === trimmed);
+					if (!isValidVarName(trimmed) || duplicated) {
+						text.inputEl.parentElement?.addClass('cr-error-input');
+						return;
+					}
+					text.inputEl.parentElement?.removeClass('cr-error-input');
+					variable.name = trimmed;
+					await this.plugin.saveSettings();
+				});
 			});
 
 			variableRow.addDropdown((drop) => {
@@ -893,7 +1038,7 @@ class CRSettingTab extends PluginSettingTab {
 					.addOption('number', t('type_number'))
 					.addOption('boolean', t('type_boolean'))
 					.setValue(variable.type)
-					.onChange(async (value: CRVariable['type']) => {
+					.onChange(async (value: 'string' | 'number' | 'boolean') => {
 						variable.type = value;
 						if (value === 'boolean') variable.value = 'true';
 						else if (value === 'number') variable.value = '0';
@@ -905,66 +1050,48 @@ class CRSettingTab extends PluginSettingTab {
 
 			const valueWrapper = createDiv({ cls: 'cr-input-value' });
 			variableRow.controlEl.appendChild(valueWrapper);
-
 			if (variable.type === 'boolean') {
-				new ToggleComponent(valueWrapper)
-					.setValue(variable.value === 'true')
-					.onChange(async (value) => {
-						variable.value = String(value);
-						await this.plugin.saveSettings();
-					});
+				new ToggleComponent(valueWrapper).setValue(variable.value === 'true').onChange(async (value) => {
+					variable.value = String(value);
+					await this.plugin.saveSettings();
+				});
 			} else {
-				new TextComponent(valueWrapper)
-					.setPlaceholder(t('placeholder_value'))
-					.setValue(variable.value)
-					.onChange(async (value) => {
-						variable.value = variable.type === 'number' && value.trim() !== '' && Number.isFinite(Number(value))
-							? String(Number(value))
-							: value;
-						await this.plugin.saveSettings();
-					});
+				new TextComponent(valueWrapper).setPlaceholder(t('placeholder_value')).setValue(variable.value).onChange(async (value) => {
+					variable.value = value;
+					await this.plugin.saveSettings();
+				});
 			}
 
 			const spacer = createDiv({ cls: 'cr-spacer' });
 			variableRow.controlEl.appendChild(spacer);
-
 			const isDefault = variable.name === this.plugin.getDefaultVariable();
 			if (isDefault) {
 				const badge = createSpan({ text: t('badge_default'), cls: 'cr-default-badge' });
 				variableRow.controlEl.appendChild(badge);
 			} else {
 				variableRow.addExtraButton((button) =>
-					button
-						.setIcon('star')
-						.setTooltip(t('tooltip_set_default'))
-						.onClick(async () => {
-							this.plugin.settings.defaultVariable = variable.name;
-							await this.plugin.saveSettings();
-							this.display();
-						}),
+					button.setIcon('star').setTooltip(t('tooltip_set_default')).onClick(async () => {
+						this.plugin.settings.defaultVariable = variable.name;
+						await this.plugin.saveSettings({ refreshViews: true });
+						this.display();
+					}),
 				);
 			}
 
 			variableRow.addExtraButton((button) =>
-				button
-					.setIcon('trash')
-					.setTooltip(t('tooltip_delete'))
-					.onClick(async () => {
-						this.plugin.settings.variables.splice(index, 1);
-						if (this.plugin.settings.defaultVariable === variable.name) {
-							this.plugin.settings.defaultVariable = this.plugin.settings.variables[0]?.name ?? '';
-						}
-						await this.plugin.saveSettings();
-						this.display();
-					}),
+				button.setIcon('trash').setTooltip(t('tooltip_delete')).onClick(async () => {
+					this.plugin.settings.variables.splice(index, 1);
+					if (this.plugin.settings.defaultVariable === variable.name) {
+						this.plugin.settings.defaultVariable = this.plugin.settings.variables[0]?.name ?? '';
+					}
+					await this.plugin.saveSettings({ refreshViews: true });
+					this.display();
+				}),
 			);
 		});
 
 		containerEl.createEl('hr');
-
-		new Setting(containerEl)
-			.setName(t('import_export_name'))
-			.setDesc(t('import_export_desc'));
+		new Setting(containerEl).setName(t('import_export_name')).setDesc(t('import_export_desc'));
 
 		const ioContainer = containerEl.createDiv();
 		const ioTextArea = new TextAreaComponent(ioContainer);
@@ -980,35 +1107,20 @@ class CRSettingTab extends PluginSettingTab {
 			style: 'display: flex; gap: 10px; margin-top: 10px; margin-bottom: 30px;',
 		});
 
-		const exportButton = btnContainer.createEl('button', { text: t('btn_export') });
-		exportButton.addEventListener('click', () => {
-			const jsonStr = JSON.stringify(this.plugin.settings.variables, null, 2);
-			ioTextArea.setValue(jsonStr);
-			this.importExportText = jsonStr;
+		btnContainer.createEl('button', { text: t('btn_export') }).addEventListener('click', () => {
+			const json = JSON.stringify(this.plugin.settings.variables, null, 2);
+			ioTextArea.setValue(json);
+			this.importExportText = json;
 		});
 
-		const importButton = btnContainer.createEl('button', { text: t('btn_import'), cls: 'mod-cta' });
-		importButton.addEventListener('click', async () => {
+		btnContainer.createEl('button', { text: t('btn_import'), cls: 'mod-cta' }).addEventListener('click', async () => {
 			try {
 				const parsed = JSON.parse(this.importExportText);
-				if (!Array.isArray(parsed)) throw new Error('Imported JSON must be an array');
-
-				const variables = parsed
-					.map((item, index) => normalizeVariable(item, index))
-					.filter(Boolean) as CRVariable[];
-				if (variables.length === 0) throw new Error('No valid variables found');
-
-				const seen = new Set<string>();
-				for (const variable of variables) {
-					if (seen.has(variable.name)) throw new Error('Duplicate variable names');
-					seen.add(variable.name);
+				if (!Array.isArray(parsed)) throw new Error('Not an array');
+				if (!parsed.every((item) => item && typeof item.name === 'string' && typeof item.type === 'string' && 'value' in item)) {
+					throw new Error('Invalid shape');
 				}
-
-				this.plugin.settings.variables = variables;
-				if (!seen.has(this.plugin.settings.defaultVariable)) {
-					this.plugin.settings.defaultVariable = variables[0].name;
-				}
-
+				this.plugin.settings.variables = parsed;
 				await this.plugin.saveSettings();
 				new Notice(t('import_success'));
 				this.display();
@@ -1018,4 +1130,3 @@ class CRSettingTab extends PluginSettingTab {
 		});
 	}
 }
-
