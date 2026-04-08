@@ -1,56 +1,85 @@
-# Conditional Render
+# Conditional Render for Obsidian
 
-Conditional Render adds variable-based conditional rendering to Obsidian.
+Conditional Render is a conditional rendering plugin for Obsidian.
+It can render inline expressions, conditional blocks, multiple hidden-display styles, and interactive input controls in notes based on global variables and note frontmatter.
 
-Use global plugin variables and note frontmatter to:
+## Features
 
-- render inline expressions
-- show or hide block content with `if / else`
-- apply hidden styles when conditions are false
-- edit values directly inside notes with interactive inputs
+- Supports inline variables and expression rendering
+- Supports `if / else` conditional code block rendering
+- Supports reading:
+  - plugin global variables
+  - `this.xxx` from the current note frontmatter
+- Supports a **default variable** for controlling short text display / hiding
+- Supports multiple hidden styles
+- Supports editing variables directly inside notes:
+  - boolean checkboxes
+  - text inputs
+  - number inputs
+- Supports the new explicit typed `cr-input` syntax
+- Keeps the legacy `cr-input` syntax for compatibility
+- Supports custom plugin identifiers such as `cr`, `cat`, and more
+- Supports variable JSON import / export
+- Supports drag-and-drop variable sorting and default variable selection
+- Suitable for frontmatter-driven workflows and template systems
 
-## Highlights
+---
 
-- Inline expression rendering with `cr:`
-- Conditional fenced blocks with `crif:` / `crelse:`
-- Access current note frontmatter through `this.xxx`
-- Configurable default variable for simple inline visibility
-- Multiple hidden styles for false conditions without `crelse:`
-- Interactive inputs for `bool`, `string`, and `number`
-- Explicit typed input syntax with options
-- Customizable plugin identifier, such as `cr` or `cat`
-- Global variables with drag sorting and default-variable selection
-- JSON import/export for variable sets
+## Quick Start
 
-## Installation
+### 1. Inline expressions
 
-Install from the Obsidian Community Plugins browser, then enable **Conditional Render**.
+Use `cr:` to output the result of an expression.
 
-## Quick example
+```md
+Plugin name: `cr: plugin_name`
+Current score: `cr: this.score`
+After adding 10: `cr: this.score + 10`
+```
 
-Frontmatter:
+### 2. Conditional code blocks
+
+Use a `cr` code block together with `crif:`.
+
+````md
+```cr
+crif: this.published
+This note has been published.
+crelse:
+This note is still a draft.
+```
+````
+
+### 3. Access frontmatter
+
+Use `this.xxx` to access the current note frontmatter.
 
 ```yaml
 ---
+title: Demo Note
 published: true
 score: 88
-done: false
 ---
 ```
 
-In the note:
-
 ```md
+Title: `cr: this.title`
 Published: `cr: this.published ? "Yes" : "No"`
-Score: `cr: this.score`
-Done: `cr-input: bool(this.done)`
 ```
+
+---
 
 ## Syntax
 
-### Inline expressions
+## Inline Syntax
 
-Use `cr:` to evaluate and render an expression.
+### Computed output
+
+```md
+`cr: expression`
+```
+
+Examples:
 
 ```md
 `cr: plugin_name`
@@ -58,40 +87,76 @@ Use `cr:` to evaluate and render an expression.
 `cr: this.score >= 60 ? "Pass" : "Fail"`
 ```
 
-### Simple conditional inline text
-
-Use the configured default variable to control whether a short text fragment is shown.
+### Simple conditional text
 
 ```md
-`cr "Visible when the default variable is truthy"`
+`cr "Text shown when the default variable is true"`
 ```
 
-### Conditional blocks
+This form is suitable for showing or hiding short text, and is controlled by the **default variable** in settings.
 
-````md
-```cr
-crif: this.published
-This note is published.
-crelse:
-This note is still a draft.
+Examples:
+
+```md
+`cr "Show this text when the default variable is true."`
+`cr "Current plugin: " + plugin_name`
 ```
-````
 
-Notes:
+### Variable interpolation in text
 
-- `crelse:` is required. Plain `crelse` is not supported.
-- If `crelse:` is omitted and the condition is false, the block is shown with the selected hidden style.
-- If `crif:` is omitted, the plugin falls back to the configured default variable.
-
-### Variable replacement inside text
+You can use `{{ ... }}` inside text or block content to inject expression results.
 
 ```md
 Current score: {{this.score}}
 ```
 
-## Hidden styles
+---
 
-When a condition is false and there is no `crelse:`, content can be hidden using one of these styles:
+## Conditional Code Blocks
+
+### Standard syntax
+
+````md
+```cr
+crif: expression
+Shown when the condition is true
+crelse:
+Shown when the condition is false
+```
+````
+
+### Without `crelse:`
+
+When the condition is false and there is no `crelse:`, the block content will be displayed using the current hidden style.
+
+````md
+```cr
+crif: this.secret
+When `this.secret` is false, this content will be handled using the hidden style.
+```
+````
+
+### Code blocks controlled by the default variable
+
+If a code block does not contain `crif:`, the plugin falls back to the **default variable**.
+
+````md
+```cr
+This code block is shown or hidden based on the default variable.
+```
+````
+
+---
+
+## Hidden Styles
+
+When a condition is false and there is no `crelse:`, Conditional Render can display “hidden content” in different ways.
+
+### Global hidden style
+
+You can choose the default hidden style in settings.
+
+Available styles:
 
 - `none`
 - `text`
@@ -103,9 +168,11 @@ When a condition is false and there is no `crelse:`, content can be hidden using
 - `spoiler-white`
 - `spoiler-white-round`
 
-You can force a style per block or inline usage.
+### Force a hidden style for a single line or code block
 
-Block examples:
+You can specify a style with a suffix.
+
+Examples:
 
 ````md
 ```cr-underline
@@ -115,21 +182,19 @@ Hidden with underline style
 
 ```cr-spoiler
 crif: false
-Hidden as spoiler
+Hidden with spoiler style
 ```
 ````
 
-Inline examples:
-
 ```md
-`cr-t "Custom hidden text"`
-`cr-u "Underline hidden text"`
-`cr-sp "Spoiler hidden text"`
+`cr-t "Shown as custom text"`
+`cr-u "Hidden with underline"`
+`cr-sp "Hidden with spoiler style"`
 ```
 
-Short aliases are also supported:
+### Full identifiers and shorthand
 
-| Full | Short |
+| Full form | Shorthand |
 |---|---|
 | `cr-none` | `cr-n` |
 | `cr-text` | `cr-t` |
@@ -141,16 +206,16 @@ Short aliases are also supported:
 | `cr-spoiler-white` | `cr-spw` |
 | `cr-spoiler-white-round` | `cr-spwr` |
 
-## Interactive inputs
+---
 
-Interactive inputs let you edit either:
+## Interactive Inputs
 
-- a global plugin variable
-- a frontmatter field in the current note via `this.xxx`
+Interactive inputs let you edit variables directly inside notes.
 
-### Recommended syntax
+### Recommended syntax: explicit typed inputs
 
-Use explicit typed inputs.
+The newer versions recommend explicit typed syntax.
+It is more stable, clearer, and easier to extend later.
 
 ```md
 `cr-input: bool(plugin_status)`
@@ -158,13 +223,28 @@ Use explicit typed inputs.
 `cr-input: number(this.score)`
 ```
 
-Supported types:
+### Editable targets
 
-- `bool(...)`
-- `string(...)`
-- `number(...)`
+- Global variables: `plugin_status`
+- Current note frontmatter: `this.score`
 
-Supported options:
+### Supported types
+
+- `bool(...)` → checkbox
+- `string(...)` → text input
+- `number(...)` → number input
+
+### Optional parameters
+
+You can keep passing parameters after the target.
+
+```md
+`cr-input: string(this.nickname, placeholder="Please enter a nickname")`
+`cr-input: number(this.score, min=0, max=100, step=1)`
+`cr-input: string(this.title, debounce=400)`
+```
+
+Currently supported parameters:
 
 - `placeholder`
 - `debounce`
@@ -172,88 +252,218 @@ Supported options:
 - `max`
 - `step`
 
-Examples:
+### Example
 
-```md
-`cr-input: string(this.nickname, placeholder="Enter a nickname")`
-`cr-input: number(this.score, min=0, max=100, step=1)`
-`cr-input: string(this.title, debounce=400)`
+```yaml
+---
+done: false
+name: Alice
+score: 75
+---
 ```
 
-### Legacy syntax
+```md
+Done: `cr-input: bool(this.done)`
+Name: `cr-input: string(this.name, placeholder="Please enter a name")`
+Score: `cr-input: number(this.score, min=0, max=100, step=1)`
+```
 
-Legacy input syntax is still supported for compatibility:
+### Legacy input syntax
+
+The plugin still supports the old syntax:
 
 ```md
 `cr-input plugin_status`
 `cr-input this.score`
 ```
 
-Legacy syntax is **not recommended**. It depends on automatic type detection and may trigger unexpected behavior in edge cases. Use explicit typed inputs in new notes and templates.
+**Legacy syntax is not recommended for continued use.**
+Because it relies on automatic type detection, it may trigger unexpected issues in some edge cases.
+For new notes and templates, prefer explicit typed syntax.
 
-## Global variables
+---
 
-Global variables are managed in plugin settings.
+## Global Variables
 
+Global variables are stored in plugin settings.
 Each variable includes:
 
 - name
-- type: `string`, `number`, or `boolean`
+- type: `string`, `number`, `boolean`
 - value
 
-Supported actions:
+Supported operations:
 
 - add variables
 - rename variables
-- change types
-- reorder by drag and drop
-- set a default variable
+- drag to reorder
+- change variable type
+- set as default variable
 - delete variables
-- import/export variables as JSON
+- JSON import / export
 
-## Settings
+### Example
 
-Conditional Render includes settings for:
+If settings contain:
 
-- plugin identifier
-- global default hidden style
-- custom hidden text for text-based styles
-- global variables
-- default variable
-- JSON import/export
+- `plugin_status = true`
+- `plugin_name = "Conditional Render"`
 
-Changing the plugin identifier updates all syntax prefixes after reload. For example, `cr` can become `cat`, which changes forms such as `crif:` to `catif:` and `cr-input:` to `cat-input:`.
+Then:
 
-## Dataview access
-
-Global variables can be accessed from DataviewJS.
-
-```dataviewjs
-const crPlugin = app.plugins.plugins["conditional-render"];
-
-if (crPlugin) {
-  const variables = crPlugin.settings.variables;
-  const targetVar = variables.find(v => v.name === "plugin_status");
-
-  if (targetVar) {
-    dv.paragraph(`Loaded: **${targetVar.value}**`);
-  }
-}
+```md
+`cr: plugin_name`
+`cr: plugin_status ? "Running" : "Stopped"`
 ```
 
-## Example note
+---
 
-See the standalone example note:
+## Default Variable
 
-- [Example note (English)](./example-note.en.md)
+You can set one global variable as the **default variable**.
+It is used for:
 
-## Tips
+- inline syntax without `:`, such as `` `cr "..."` ``
+- `cr` code blocks without `crif:`
 
-- Use typed `cr-input` syntax in all new content.
-- Use `this.xxx` when a value belongs to the current note.
-- Use global variables for reusable states shared across notes.
-- Prefer explicit hidden styles in templates when predictable output matters.
+Example:
+
+```md
+`cr "This sentence is shown only when the default variable is true."`
+```
+
+---
+
+## Custom Identifier
+
+The default identifier is `cr`.
+You can change it in settings.
+
+For example, after changing the identifier to `cat`:
+
+- `cr:` → `cat:`
+- `crif:` → `catif:`
+- `crelse:` → `catelse:`
+- `cr-input:` → `cat-input:`
+- `cr-spoiler` → `cat-spoiler`
+
+Example:
+
+```md
+`cat: this.score`
+`cat-input: bool(this.done)`
+```
+
+---
+
+## Settings Overview
+
+Plugin settings include:
+
+- **Plugin Identifier**
+- **Global Default Hidden Style**
+- **Custom hidden text** (for text / text-grey)
+- **Global variable management**
+- **Default variable setting**
+- **Variable JSON import / export**
+- Full-form / shorthand legend
+
+---
+
+## Variable Import and Export
+
+Conditional Render supports exporting all global variables as JSON and importing them later.
+This is useful for:
+
+- backing up configurations
+- sharing presets
+- reusing variable sets across multiple vaults
+
+---
+
+## Example Note
+
+````md
+---
+title: Demo
+published: true
+score: 88
+secret: false
+---
+
+# Conditional Render Demo
+
+Title: `cr: this.title`
+Status: `cr: this.published ? "Published" : "Draft"`
+
+`cr "This line is controlled by the default variable."`
+
+```cr
+crif: this.published
+Because this note is published, this section will be shown.
+crelse:
+When the note is not published, this section will be shown instead.
+```
+
+```cr-spoiler
+crif: this.secret
+When secret is false, this content will be hidden with spoiler style.
+```
+
+Score editor: `cr-input: number(this.score, min=0, max=100, step=1)`
+Publish state editor: `cr-input: bool(this.published)`
+````
+
+---
+
+## Error Handling
+
+When typed input syntax is invalid, the plugin shows an inline error message instead of failing silently.
+Common errors include:
+
+- empty input target
+- invalid typed syntax format
+- unsupported type
+- invalid target variable format
+- invalid parameter format
+- typed input declared type does not match the configured global variable type
+
+Examples:
+
+```md
+`cr-input: bool()`
+`cr-input: text(this.done)`
+`cr-input: bool(my var)`
+```
+
+---
+
+## Compatibility Notes
+
+- `crelse:` in conditional code blocks must include the colon
+- legacy `cr-input target` is kept for compatibility only
+- strongly recommended to migrate to the new `cr-input: type(target)` syntax
+- if a typed global input declares a type that does not match the variable type in settings, an inline error will be shown directly
+
+---
+
+## Advanced Usage
+
+Because global variables are stored in plugin settings, advanced users can also access them through the plugin instance in contexts such as DataviewJS.
+A common approach is to get the plugin instance via `app.plugins.plugins["conditional-render"]` and then read `settings.variables`.
+
+---
+
+## Best Practices
+
+- Use typed input syntax consistently in new notes and templates
+- Prefer frontmatter for note-local state
+- Prefer global variables for state shared across notes
+- Keep one semantically clear default variable
+- For reusable templates, prefer explicitly specifying hidden styles
+
+---
 
 ## License
 
-MIT
+License information can be added here.
