@@ -1,0 +1,119 @@
+/* --- 设置页面排版 --- */
+.cr-setting-row .setting-item-info { display: none !important; }
+.cr-setting-row .setting-item-control { width: 100%; justify-content: flex-start; gap: 12px; align-items: center; padding-top: 5px; padding-bottom: 5px;}
+.cr-drag-handle { cursor: grab; opacity: 0.4; display: flex; align-items: center; flex: 0 0 20px; }
+.cr-drag-handle:active { cursor: grabbing; }
+.cr-drag-handle:hover { opacity: 1; color: var(--interactive-accent); }
+.cr-input-value { display: flex; align-items: center; }
+.cr-spacer { margin-left: auto; }
+.cr-default-badge { font-size: 0.7em; color: var(--text-on-accent); background-color: var(--interactive-accent); padding: 2px 6px; border-radius: 8px; white-space: nowrap; font-weight: normal; opacity: 0.9; flex: 0 0 auto;}
+.cr-drag-over { border-top: 2px dashed var(--interactive-accent); opacity: 0.7; }
+
+/* 0.0.8 错误输入框高亮校验样式 */
+.cr-error-input input { border-color: var(--text-error) !important; box-shadow: 0 0 0 1px var(--text-error); }
+.cr-error-text { color: var(--text-error); font-size: 0.8em; margin-top: 4px; font-weight: bold; }
+
+/* --- 图例 3x3 网格排版 --- */
+.cr-style-legend { 
+	display: grid; 
+	grid-template-columns: repeat(3, 1fr); 
+	gap: 16px; 
+	margin-top: 12px; 
+	padding: 16px; 
+	background-color: var(--background-secondary-alt); 
+	border-radius: 8px; 
+	border: 1px solid var(--background-modifier-border); 
+	font-size: 0.9em; 
+}
+.cr-legend-item { display: flex; align-items: center; gap: 8px; white-space: nowrap; }
+.cr-legend-item code { color: var(--text-accent); font-weight: bold; background: transparent; padding: 0; }
+
+/* --- 行内隐藏样式 --- */
+.cr-hidden-text { color: inherit; } 
+.cr-hidden-text-grey { color: var(--text-muted); } 
+
+.cr-hidden-underline { color: transparent; border-bottom: 2px solid var(--text-muted); transition: 0.2s; cursor: pointer; user-select: none; }
+.cr-hidden-underline:hover { color: var(--text-normal); }
+.cr-hidden-blank { color: transparent; transition: 0.2s; cursor: pointer; user-select: none; }
+.cr-hidden-blank:hover { color: var(--text-normal); }
+
+/* 防剧透黑条/白条 (直角与圆角) */
+.cr-hidden-spoiler, .cr-hidden-spoiler-round { background-color: #000; color: transparent; transition: 0.2s; cursor: pointer; user-select: none; }
+.cr-hidden-spoiler-white, .cr-hidden-spoiler-white-round { background-color: #fff; color: transparent; transition: 0.2s; cursor: pointer; user-select: none; }
+.cr-hidden-spoiler-round, .cr-hidden-spoiler-white-round { border-radius: 4px; }
+
+.cr-hidden-spoiler:hover, .cr-hidden-spoiler-round:hover, 
+.cr-hidden-spoiler-white:hover, .cr-hidden-spoiler-white-round:hover { background-color: transparent; color: var(--text-normal); }
+
+/* --- 代码区块隐藏样式 --- */
+.cr-block-text, .cr-block-text-grey { 
+	background-color: var(--background-secondary-alt);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m);
+	padding: 12px 16px;
+	margin: 1em 0;
+}
+.cr-block-text { color: inherit; }
+.cr-block-text-grey { color: var(--text-muted); }
+.cr-block-text > *:first-child, .cr-block-text-grey > *:first-child { margin-top: 0; }
+.cr-block-text > *:last-child, .cr-block-text-grey > *:last-child { margin-bottom: 0; }
+
+.cr-block-spoiler, .cr-block-spoiler-round, .cr-block-spoiler-white, .cr-block-spoiler-white-round, .cr-block-underline, .cr-block-blank { cursor: pointer; }
+
+.cr-block-spoiler > *, .cr-block-spoiler-round > *, .cr-block-spoiler-white > *, .cr-block-spoiler-white-round > *, .cr-block-underline > *, .cr-block-blank > * {
+	width: fit-content;
+	max-width: 100%;
+	transition: 0.3s;
+}
+
+.cr-block-underline > * { color: transparent !important; border-bottom: 2px dashed var(--text-muted); }
+.cr-block-underline > * * { color: transparent !important; }
+.cr-block-underline:hover > * { color: unset !important; border-bottom-color: transparent; }
+.cr-block-underline:hover > * * { color: unset !important; }
+
+.cr-block-blank > * { color: transparent !important; }
+.cr-block-blank > * * { color: transparent !important; }
+.cr-block-blank:hover > * { color: unset !important; }
+.cr-block-blank:hover > * * { color: unset !important; }
+
+.cr-block-spoiler > *, .cr-block-spoiler-round > * { background-color: #000; color: transparent !important; padding: 0 4px; }
+.cr-block-spoiler-white > *, .cr-block-spoiler-white-round > * { background-color: #fff; color: transparent !important; padding: 0 4px; }
+.cr-block-spoiler-round > *, .cr-block-spoiler-white-round > * { border-radius: 4px; }
+
+.cr-block-spoiler > * *, .cr-block-spoiler-round > * *, .cr-block-spoiler-white > * *, .cr-block-spoiler-white-round > * * { color: transparent !important; } 
+
+.cr-block-spoiler:hover > *, .cr-block-spoiler-round:hover > *, .cr-block-spoiler-white:hover > *, .cr-block-spoiler-white-round:hover > * { background-color: transparent; color: unset !important; }
+.cr-block-spoiler:hover > * *, .cr-block-spoiler-round:hover > * *, .cr-block-spoiler-white:hover > * *, .cr-block-spoiler-white-round:hover > * * { color: unset !important; }
+
+/* ========================================== */
+/* 0.10.0 交互式输入框样式 (Interactive Input) */
+/* ========================================== */
+.cr-interactive-input {
+	background-color: var(--background-modifier-form-field);
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-normal);
+	border-radius: var(--radius-s);
+	padding: 2px 8px;
+	font-family: inherit;
+	font-size: 0.9em;
+	transition: border-color 0.15s, box-shadow 0.15s;
+	outline: none;
+	width: 120px;
+}
+
+.cr-interactive-input:focus {
+	border-color: var(--interactive-accent);
+	box-shadow: 0 0 0 2px var(--background-modifier-border-focus);
+}
+
+.cr-interactive-input[type="checkbox"] {
+	cursor: pointer;
+	width: 16px;
+	height: 16px;
+	margin: 0 4px;
+	vertical-align: middle;
+}
+
+.cr-interactive-input[type="number"] {
+	width: 70px;
+}
