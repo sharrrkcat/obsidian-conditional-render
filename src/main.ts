@@ -305,7 +305,10 @@ export default class ConditionalRenderPlugin extends Plugin {
 			}
 
 			if (hasDynamicWork) {
-				this.scheduleDynamicRefresh(context.sourcePath);
+				const insideDynamicAncestor = !!element.closest('[data-cr-dynamic="true"]');
+				if (!insideDynamicAncestor) {
+					this.scheduleDynamicRefresh(context.sourcePath);
+				}
 			}
 		});
 	}
@@ -696,6 +699,9 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 		const liveElements = Array.from(document.querySelectorAll<HTMLElement>('[data-cr-dynamic="true"]'));
 		for (const element of liveElements) {
+			const ancestorDynamic = element.parentElement?.closest<HTMLElement>('[data-cr-dynamic="true"]');
+			if (ancestorDynamic) continue;
+
 			const binding = this.getDynamicRenderBinding(element);
 			if (!binding) continue;
 			if (changedPath && binding.sourcePath !== changedPath) continue;
