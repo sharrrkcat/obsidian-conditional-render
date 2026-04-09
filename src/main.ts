@@ -75,6 +75,11 @@ interface InputState {
 	pendingCommitTimer: number | null;
 }
 
+interface CRBlockBranch {
+	condition: string;
+	content: string;
+}
+
 interface DynamicRenderBinding {
 	sourcePath: string;
 	kind: 'inline-expression' | 'inline-default' | 'inline-conditional' | 'block';
@@ -83,9 +88,8 @@ interface DynamicRenderBinding {
 	rawContent?: string;
 	hiddenTextOverride?: string;
 	condition?: string;
-	trueContent?: string;
-	falseContent?: string;
-	hasElse?: boolean;
+	branches?: CRBlockBranch[];
+	elseContent?: string;
 }
 
 const DEFAULT_SETTINGS: ConditionalRenderSettings = {
@@ -198,7 +202,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 		this.addSettingTab(new CRSettingTab(this.app, this));
-		console.log(t('log_loaded').replace('0.12.0', '0.15.6'));
+		console.log(t('log_loaded').replace('0.12.0', '0.16.0'));
 
 		this.registerProcessors();
 
@@ -336,35 +340,59 @@ export default class ConditionalRenderPlugin extends Plugin {
 			const id = this.settings.identifier;
 			const lines = source.split('\n');
 
-			let condition = '';
-			const trueContent: string[] = [];
-			const falseContent: string[] = [];
-			let currentMode: 'true' | 'false' = 'true';
-			let hasIf = false;
-			let hasElse = false;
+			const ifPrefix = `${id} if:`;
+			const elseIfPrefix = `${id} else if:`;
+			const elsePrefix = `${id} else:`;
 
-			const ifPrefix = `${id}if:`;
-			const elsePrefix = `${id}else:`;
+			const branches: CRBlockBranch[] = [];
+			let elseContent = '';
+			let currentCondition: string | null = null;
+			let currentLines: string[] = [];
+			let currentMode: 'leading' | 'branch' | 'else' = 'leading';
+			let sawDirective = false;
+
+			const flushCurrent = () => {
+				if (currentMode === 'branch' && currentCondition !== null) {
+					branches.push({ condition: currentCondition, content: currentLines.join('\n') });
+				} else if (currentMode === 'else') {
+					elseContent = currentLines.join('\n');
+				}
+				currentCondition = null;
+				currentLines = [];
+			};
 
 			for (const line of lines) {
 				const trimmed = line.trim();
 				if (trimmed.startsWith(ifPrefix)) {
-					condition = trimmed.slice(ifPrefix.length).trim();
-					hasIf = true;
-				} else if (trimmed.startsWith(elsePrefix)) {
-					currentMode = 'false';
-					hasElse = true;
-				} else if (currentMode === 'true') {
-					trueContent.push(line);
-				} else {
-					falseContent.push(line);
+					flushCurrent();
+					currentCondition = trimmed.slice(ifPrefix.length).trim() || 'true';
+					currentMode = 'branch';
+					sawDirective = true;
+					continue;
 				}
-			}
+				if (trimmed.startsWith(elseIfPrefix)) {
+					flushCurrent();
+					currentCondition = trimmed.slice(elseIfPrefix.length).trim() || 'true';
+					currentMode = 'branch';
+					sawDirective = true;
+					continue;
+				}
+				if (trimmed.startsWith(elsePrefix)) {
+					flushCurrent();
+					currentMode = 'else';
+					sawDirective = true;
+					continue;
+				}
 
-			if (!hasIf && this.settings.variables.length > 0) {
-				condition = this.getDefaultVariable();
-			} else if (!hasIf) {
-				condition = 'true';
+				currentLines.push(line);
+			}
+			flushCurrent();
+
+			if (!sawDirective) {
+				branches.push({
+					condition: this.settings.variables.length > 0 ? this.getDefaultVariable() : 'true',
+					content: source,
+				});
 			}
 
 			let activeStyle = this.settings.hiddenStyle;
@@ -374,10 +402,8 @@ export default class ConditionalRenderPlugin extends Plugin {
 			this.registerDynamicRender(container, {
 				sourcePath: ctx.sourcePath,
 				kind: 'block',
-				condition,
-				trueContent: trueContent.join('\n'),
-				falseContent: falseContent.join('\n'),
-				hasElse,
+				branches,
+				elseContent,
 				style: activeStyle,
 			});
 			this.refreshDynamicRender(container);
@@ -462,7 +488,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		| { ok: false; message: string } {
 		const segments = this.splitTopLevelPipe(raw, allowHiddenOverride ? 3 : 2).map((segment) => segment.trim());
 		if (segments.length < 2 || !segments[0] || !segments[1]) {
-			return { ok: false, message: `Invalid inline conditional syntax. Use ${this.settings.identifier}if: condition | text` };
+			return { ok: false, message: `Invalid inline conditional syntax. Use ${this.settings.identifier}-if: condition | text` };
 		}
 		const value: { condition: string; visibleText: string; hiddenTextOverride?: string } = {
 			condition: segments[0],
@@ -670,17 +696,28 @@ export default class ConditionalRenderPlugin extends Plugin {
 			return;
 		}
 
-		const isTrue = !!this.evaluateExpression(binding.condition ?? 'true', binding.sourcePath);
+		const branches = binding.branches ?? [];
 		let targetContent = '';
 		let shouldRenderHidden = false;
-		if (isTrue) {
-			targetContent = binding.trueContent ?? '';
-		} else if (binding.hasElse) {
-			targetContent = binding.falseContent ?? '';
-		} else {
-			shouldRenderHidden = true;
-			targetContent = binding.trueContent ?? '';
+		let matched = false;
+
+		for (const branch of branches) {
+			if (!!this.evaluateExpression(branch.condition, binding.sourcePath)) {
+				targetContent = branch.content;
+				matched = true;
+				break;
+			}
 		}
+
+		if (!matched) {
+			if ((binding.elseContent ?? '').length > 0) {
+				targetContent = binding.elseContent ?? '';
+			} else {
+				shouldRenderHidden = true;
+				targetContent = branches[0]?.content ?? '';
+			}
+		}
+
 		targetContent = this.replaceVariables(targetContent, binding.sourcePath);
 		if (!targetContent.trim()) {
 			this.clearDynamicContainer(element);
@@ -1784,7 +1821,7 @@ class CRSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl('h2', { text: t('settings_title').replace('0.12.0', '0.15.6') });
+		containerEl.createEl('h2', { text: t('settings_title').replace('0.12.0', '0.15.1') });
 
 		new Setting(containerEl)
 			.setName(t('plugin_identifier_name'))
