@@ -117,3 +117,24 @@
 .cr-interactive-input[type="number"] {
 	width: 70px;
 }
+
+
+/* ========================================== */
+/* 0.17.2 select list display style fix       */
+/* ========================================== */
+.cr-interactive-input[data-cr-display-mode="list"] {
+	height: auto !important;
+	max-height: none !important;
+	padding: 0 !important;
+	overflow-y: auto;
+	vertical-align: middle;
+	appearance: auto;
+	-webkit-appearance: listbox;
+	box-sizing: border-box;
+}
+
+.cr-interactive-input[data-cr-display-mode="list"] option {
+	padding: 4px 8px;
+	line-height: 1.5;
+	white-space: nowrap;
+}

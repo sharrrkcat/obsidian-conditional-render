@@ -958,8 +958,15 @@ export default class ConditionalRenderPlugin extends Plugin {
 		const trimmed = raw.trim();
 		if (/^(true|false)$/i.test(trimmed)) return trimmed.toLowerCase() === 'true';
 		if (/^-?\d+(\.\d+)?$/.test(trimmed)) return Number(trimmed);
-		const quoted = trimmed.match(/^(["'])([\s\S]*)$/);
-		if (quoted) return quoted[2];
+
+		if (trimmed.length >= 2) {
+			const first = trimmed[0];
+			const last = trimmed[trimmed.length - 1];
+			if ((first === '"' || first === "'") && last === first) {
+				return trimmed.slice(1, -1);
+			}
+		}
+
 		if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
 			try {
 				const parsed = JSON.parse(trimmed);
@@ -970,6 +977,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 				// fall through
 			}
 		}
+
 		return trimmed;
 	}
 
@@ -1407,6 +1415,31 @@ export default class ConditionalRenderPlugin extends Plugin {
 		return this.inputBindings.get(controlEl)?.spec.options ?? {};
 	}
 
+
+	private getControlWidthCss(options: Record<string, CRInputOptionValue>): string | null {
+		const width = options.width;
+		if (typeof width === 'number' && Number.isFinite(width) && width > 0) {
+			return `${width}px`;
+		}
+		if (typeof width === 'string' && width.trim()) {
+			return width.trim();
+		}
+		return null;
+	}
+
+	private applyControlWidth(controlEl: CRControlElement, fallbackWidth: string, options: Record<string, CRInputOptionValue>) {
+		const customWidth = this.getControlWidthCss(options);
+		controlEl.style.width = customWidth ?? fallbackWidth;
+	}
+
+	private getSelectDisplayMode(options: Record<string, CRInputOptionValue>): 'dropdown' | 'list' {
+		const display = options.display;
+		if (typeof display === 'string' && display.trim().toLowerCase() === 'list') {
+			return 'list';
+		}
+		return 'dropdown';
+	}
+
 	private scheduleCommit(controlEl: CRControlElement) {
 		const state = this.getInputState(controlEl);
 		if (state.isComposing) return;
@@ -1600,31 +1633,39 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 	private applySelectOptions(controlEl: HTMLSelectElement, normalizedOptions: string[], options: Record<string, CRInputOptionValue>, currentValue: string) {
 		const placeholder = typeof options.placeholder === 'string' ? options.placeholder : '';
+		const displayMode = this.getSelectDisplayMode(options);
 		const values = [...normalizedOptions];
 		if (currentValue && !values.includes(currentValue)) {
 			values.unshift(currentValue);
 		}
 
-		const signature = JSON.stringify({ values, placeholder, currentValue });
-		if (controlEl.dataset.crOptionsSignature === signature) {
-			controlEl.value = currentValue;
-			return;
+		const signature = JSON.stringify({ values, placeholder, currentValue, displayMode });
+		if (controlEl.dataset.crOptionsSignature !== signature) {
+			controlEl.innerHTML = '';
+			if (placeholder) {
+				const placeholderOption = document.createElement('option');
+				placeholderOption.value = '';
+				placeholderOption.textContent = placeholder;
+				controlEl.appendChild(placeholderOption);
+			}
+			for (const optionValue of values) {
+				const optionEl = document.createElement('option');
+				optionEl.value = optionValue;
+				optionEl.textContent = optionValue;
+				controlEl.appendChild(optionEl);
+			}
+			controlEl.dataset.crOptionsSignature = signature;
 		}
 
-		controlEl.innerHTML = '';
-		if (placeholder) {
-			const placeholderOption = document.createElement('option');
-			placeholderOption.value = '';
-			placeholderOption.textContent = placeholder;
-			controlEl.appendChild(placeholderOption);
+		if (displayMode === 'list') {
+			const visibleCount = Math.max(2, controlEl.options.length || values.length || 2);
+			controlEl.size = visibleCount;
+			controlEl.dataset.crDisplayMode = 'list';
+		} else {
+			controlEl.removeAttribute('size');
+			controlEl.dataset.crDisplayMode = 'dropdown';
 		}
-		for (const optionValue of values) {
-			const optionEl = document.createElement('option');
-			optionEl.value = optionValue;
-			optionEl.textContent = optionValue;
-			controlEl.appendChild(optionEl);
-		}
-		controlEl.dataset.crOptionsSignature = signature;
+
 		controlEl.value = currentValue;
 	}
 
@@ -1653,7 +1694,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 					controlEl.removeAttribute('max');
 					controlEl.removeAttribute('step');
 					controlEl.removeAttribute('inputmode');
-					controlEl.style.width = '72px';
+					this.applyControlWidth(controlEl, '72px', options);
 					controlEl.style.textAlign = 'center';
 					this.ensureNumberStepperControls(controlEl);
 					return;
@@ -1666,7 +1707,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 				controlEl.removeAttribute('min');
 				controlEl.removeAttribute('max');
 				controlEl.removeAttribute('step');
-				controlEl.style.width = '120px';
+				this.applyControlWidth(controlEl, '120px', options);
 				controlEl.style.textAlign = '';
 				return;
 			}
@@ -1681,12 +1722,12 @@ export default class ConditionalRenderPlugin extends Plugin {
 			if (controlType === 'calendar') {
 				controlEl.type = 'date';
 				controlEl.dataset.crDisplayType = 'calendar';
-				controlEl.style.width = '150px';
+				this.applyControlWidth(controlEl, '150px', options);
 				controlEl.style.textAlign = '';
 				return;
 			}
 			controlEl.type = 'text';
-			controlEl.style.width = '120px';
+			this.applyControlWidth(controlEl, '120px', options);
 			controlEl.style.textAlign = '';
 			return;
 		}
@@ -1697,7 +1738,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			controlEl.placeholder = placeholder;
 			const rows = typeof options.rows === 'number' && Number.isFinite(options.rows) && options.rows > 0 ? Math.floor(options.rows) : 3;
 			controlEl.rows = rows;
-			controlEl.style.width = '240px';
+			this.applyControlWidth(controlEl, '240px', options);
 			controlEl.style.minHeight = `${rows * 1.8}em`;
 			controlEl.style.resize = 'vertical';
 			controlEl.style.verticalAlign = 'top';
@@ -1705,8 +1746,9 @@ export default class ConditionalRenderPlugin extends Plugin {
 		}
 
 		controlEl.disabled = false;
-		controlEl.style.width = '160px';
+		this.applyControlWidth(controlEl, '160px', options);
 		controlEl.style.textAlign = '';
+		controlEl.style.verticalAlign = this.getSelectDisplayMode(options) === 'list' ? 'top' : '';
 		this.applySelectOptions(controlEl, selectOptions ?? [], options, currentValue);
 	}
 
