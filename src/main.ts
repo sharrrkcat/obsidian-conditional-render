@@ -255,7 +255,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 					continue;
 				}
 
-				const inlineIfRegex = new RegExp(`^${escapeRegex(id)}if(?:-([a-z-]+))?:\\s*([\\s\\S]*)$`);
+				const inlineIfRegex = new RegExp(`^${escapeRegex(id)}-if(?:-([a-z-]+))?:\\s*([\\s\\S]*)$`);
 				const inlineIfMatch = text.match(inlineIfRegex);
 				if (inlineIfMatch) {
 					const styleToken = inlineIfMatch[1];
