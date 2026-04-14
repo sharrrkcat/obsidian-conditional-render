@@ -42,7 +42,7 @@ export type CRHiddenStyle =
 	| 'spoiler-white-round';
 
 type CRInputValueType = 'string' | 'number' | 'boolean';
-type CRInputControlType = 'string' | 'number' | 'boolean' | 'textarea' | 'select' | 'calendar';
+type CRInputControlType = 'string' | 'number' | 'boolean' | 'textarea' | 'select' | 'calendar' | 'random';
 type CRInputOptionValue = string | number | boolean | string[];
 type CRControlElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
 type CRInputSyntaxMode = 'typed' | 'legacy';
@@ -148,6 +148,7 @@ const INPUT_TYPE_ALIASES: Record<string, CRInputControlType> = {
 	textarea: 'textarea',
 	select: 'select',
 	calendar: 'calendar',
+	random: 'random',
 };
 
 const isValidVarName = (name: string) => /^[a-zA-Z_$][a-zA-Z0-9_$]*$/.test(name);
@@ -203,7 +204,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 		this.addSettingTab(new CRSettingTab(this.app, this));
-		console.log(t('log_loaded').replace('0.12.0', '0.18.0'));
+		console.log(t('log_loaded').replace('0.12.0', '0.18.1'));
 
 		this.registerProcessors();
 
@@ -832,7 +833,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		if (!typedMatch) {
 			return {
 				ok: false,
-				message: 'Invalid typed syntax. Use cr-input: bool(name) / string(name) / number(this.score) / textarea(note) / select(status, options=["a","b"]) / select(status, optionsFrom=myList) / calendar(date, format="YYYY-MM-DD")',
+				message: 'Invalid typed syntax. Use cr-input: bool(name) / string(name) / number(this.score) / textarea(note) / select(status, options=["a","b"]) / select(status, optionsFrom=myList) / calendar(date, format="YYYY-MM-DD") / random(temp.roll, range="[1,20]", decimals=0)',
 			};
 		}
 
@@ -841,7 +842,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		if (!explicitControlType) {
 			return {
 				ok: false,
-				message: `Unsupported input type "${rawType}". Allowed: bool, string, number, textarea, select, calendar`,
+				message: `Unsupported input type "${rawType}". Allowed: bool, string, number, textarea, select, calendar, random`,
 			};
 		}
 
@@ -884,6 +885,18 @@ export default class ConditionalRenderPlugin extends Plugin {
 			const format = this.getCalendarFormat(options);
 			if (!format) {
 				return { ok: false, message: 'calendar(...) requires a valid format string' };
+			}
+		}
+
+
+		if (explicitControlType === 'random') {
+			const randomRange = this.parseRandomRangeOption(options);
+			if (!randomRange.ok) {
+				return { ok: false, message: randomRange.message };
+			}
+			const decimals = this.getRandomDecimals(options);
+			if (!Number.isInteger(decimals) || decimals < 0) {
+				return { ok: false, message: 'random(...) requires decimals to be a non-negative integer' };
 			}
 		}
 
@@ -1066,9 +1079,72 @@ export default class ConditionalRenderPlugin extends Plugin {
 		return parsed.format(format);
 	}
 
+
+	private parseRandomRangeOption(options: Record<string, CRInputOptionValue>): { ok: true; value: { min: number; max: number; minInclusive: boolean; maxInclusive: boolean } } | { ok: false; message: string } {
+		const rawRange = options.range;
+		const text = typeof rawRange === 'string' && rawRange.trim() ? rawRange.trim() : '[0,1)';
+		const match = text.match(/^([\[(])\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*([\])])$/);
+		if (!match) {
+			return { ok: false, message: 'random(...) requires range like "[1,20]" or "[0,1)"' };
+		}
+		const min = Number(match[2]);
+		const max = Number(match[3]);
+		if (!Number.isFinite(min) || !Number.isFinite(max)) {
+			return { ok: false, message: 'random(...) range bounds must be valid numbers' };
+		}
+		if (min > max) {
+			return { ok: false, message: 'random(...) range min cannot be greater than max' };
+		}
+		const minInclusive = match[1] === '[';
+		const maxInclusive = match[4] === ']';
+		if (min === max && !(minInclusive && maxInclusive)) {
+			return { ok: false, message: 'random(...) equal bounds must use an inclusive range like [5,5]' };
+		}
+		return { ok: true, value: { min, max, minInclusive, maxInclusive } };
+	}
+
+	private getRandomDecimals(options: Record<string, CRInputOptionValue>): number {
+		const value = options.decimals;
+		if (typeof value === 'number' && Number.isFinite(value) && value >= 0) {
+			return Math.floor(value);
+		}
+		return 2;
+	}
+
+	private generateRandomValue(controlEl: CRControlElement): number | null {
+		const options = this.getInputOptions(controlEl);
+		const parsedRange = this.parseRandomRangeOption(options);
+		if (!parsedRange.ok) return null;
+
+		const { min, max, minInclusive, maxInclusive } = parsedRange.value;
+		const decimals = this.getRandomDecimals(options);
+
+		if (decimals <= 0) {
+			const low = minInclusive ? Math.ceil(min) : Math.floor(min) + 1;
+			const high = maxInclusive ? Math.floor(max) : Math.ceil(max) - 1;
+			if (low > high) return null;
+			if (low === high) return low;
+			return low + Math.floor(Math.random() * (high - low + 1));
+		}
+
+		const factor = 10 ** Math.min(decimals, 10);
+		const step = 1 / factor;
+		let low = minInclusive ? min : min + step;
+		let high = maxInclusive ? max : max - step;
+		low = Math.round(low * factor) / factor;
+		high = Math.round(high * factor) / factor;
+		if (low > high) return null;
+		if (low === high) return Number(low.toFixed(decimals));
+
+		const raw = low + Math.random() * (high - low);
+		const rounded = Math.round(raw * factor) / factor;
+		const clamped = Math.min(high, Math.max(low, rounded));
+		return Number(clamped.toFixed(decimals));
+	}
+
 	private getExplicitValueType(controlType: CRInputControlType): CRInputValueType {
 		if (controlType === 'boolean') return 'boolean';
-		if (controlType === 'number') return 'number';
+		if (controlType === 'number' || controlType === 'random') return 'number';
 		return 'string';
 	}
 
@@ -1359,6 +1435,48 @@ export default class ConditionalRenderPlugin extends Plugin {
 		this.updateNumberStepperDisabledState(controlEl, nextValue);
 	}
 
+
+
+	private ensureRandomButton(controlEl: CRControlElement) {
+		if (!this.isInputElement(controlEl)) return;
+		const wrapper = this.getInputWrapper(controlEl);
+		if (!wrapper) return;
+
+		wrapper.style.display = 'inline-flex';
+		wrapper.style.alignItems = 'center';
+		wrapper.style.gap = '4px';
+
+		let button = wrapper.querySelector<HTMLButtonElement>('[data-cr-random="roll"]');
+		if (!button) {
+			button = document.createElement('button');
+			button.type = 'button';
+			button.dataset.crRandom = 'roll';
+			button.textContent = '🎲';
+			button.title = 'Generate random value';
+			this.applyStepperButtonStyle(button);
+			button.addEventListener('click', (event) => {
+				event.preventDefault();
+				event.stopPropagation();
+				void this.rollRandomInput(controlEl);
+			});
+			wrapper.appendChild(button);
+		}
+	}
+
+	private clearRandomButton(controlEl: CRControlElement) {
+		const wrapper = this.getInputWrapper(controlEl);
+		if (!wrapper) return;
+		wrapper.querySelectorAll('[data-cr-random]').forEach((el) => el.remove());
+	}
+
+	private async rollRandomInput(controlEl: CRControlElement) {
+		if (!this.isInputElement(controlEl)) return;
+		const nextValue = this.generateRandomValue(controlEl);
+		if (nextValue === null) return;
+		controlEl.value = String(nextValue);
+		await this.commitInputValue(controlEl, nextValue);
+	}
+
 	private setupInputListeners(controlEl: CRControlElement) {
 		controlEl.addEventListener('focus', () => {
 			const state = this.getInputState(controlEl);
@@ -1521,6 +1639,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			controlEl.readOnly = true;
 			controlEl.value = `Error: ${message}`;
 			this.clearNumberStepperControls(controlEl);
+			this.clearRandomButton(controlEl);
 			return;
 		}
 		if (this.isTextAreaElement(controlEl)) {
@@ -1561,7 +1680,9 @@ export default class ConditionalRenderPlugin extends Plugin {
 				newValue = this.clampNumberValue(parsed, this.getNumberConstraints(controlEl));
 			}
 			this.setControlValue(controlEl, String(newValue));
-			this.updateNumberStepperDisabledState(controlEl, newValue);
+			if (this.isInputElement(controlEl) && controlEl.dataset.crDisplayType === 'number') {
+				this.updateNumberStepperDisabledState(controlEl, newValue);
+			}
 		} else {
 			if (this.isInputElement(controlEl) && controlEl.dataset.crDisplayType === 'calendar') {
 				const format = this.getCalendarFormat(resolved.options);
@@ -1668,7 +1789,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		}
 
 		if (this.getControlValue(controlEl) !== nextValue) this.setControlValue(controlEl, nextValue);
-		if (valueType === 'number') {
+		if (valueType === 'number' && this.isInputElement(controlEl) && controlEl.dataset.crDisplayType === 'number') {
 			const numericValue = nextValue === '' ? null : Number(nextValue);
 			this.updateNumberStepperDisabledState(controlEl, Number.isFinite(numericValue as number) ? (numericValue as number) : null);
 		}
@@ -1729,6 +1850,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			controlEl.style.resize = '';
 			controlEl.style.verticalAlign = '';
 			if (controlType === 'number') {
+				this.clearRandomButton(controlEl);
 				if (this.hasExplicitNumberControls(controlEl)) {
 					controlEl.type = 'text';
 					controlEl.dataset.crDisplayType = 'number';
@@ -1757,18 +1879,31 @@ export default class ConditionalRenderPlugin extends Plugin {
 			delete controlEl.dataset.crDisplayType;
 			this.clearNumberStepperControls(controlEl);
 			if (controlType === 'boolean') {
+				this.clearRandomButton(controlEl);
 				controlEl.type = 'checkbox';
 				controlEl.style.width = '';
 				controlEl.style.textAlign = '';
 				return;
 			}
 			if (controlType === 'calendar') {
+				this.clearRandomButton(controlEl);
 				controlEl.type = 'date';
 				controlEl.dataset.crDisplayType = 'calendar';
 				this.applyControlWidth(controlEl, '150px', options);
 				controlEl.style.textAlign = '';
 				return;
 			}
+			if (controlType === 'random') {
+				controlEl.type = 'text';
+				controlEl.dataset.crDisplayType = 'random';
+				controlEl.readOnly = true;
+				controlEl.removeAttribute('inputmode');
+				this.ensureRandomButton(controlEl);
+				this.applyControlWidth(controlEl, '120px', options);
+				controlEl.style.textAlign = '';
+				return;
+			}
+			this.clearRandomButton(controlEl);
 			controlEl.type = 'text';
 			this.applyControlWidth(controlEl, '120px', options);
 			controlEl.style.textAlign = '';
@@ -1776,6 +1911,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		}
 
 		if (this.isTextAreaElement(controlEl)) {
+			this.clearRandomButton(controlEl);
 			controlEl.disabled = false;
 			controlEl.readOnly = false;
 			controlEl.placeholder = placeholder;
@@ -1788,6 +1924,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			return;
 		}
 
+		this.clearRandomButton(controlEl);
 		controlEl.disabled = false;
 		this.applyControlWidth(controlEl, '160px', options);
 		controlEl.style.textAlign = '';
@@ -1960,7 +2097,7 @@ class CRSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl('h2', { text: t('settings_title').replace('0.12.0', '0.18.0') });
+		containerEl.createEl('h2', { text: t('settings_title').replace('0.12.0', '0.18.1') });
 
 		new Setting(containerEl)
 			.setName(t('plugin_identifier_name'))
