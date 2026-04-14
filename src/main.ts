@@ -59,7 +59,7 @@ interface ParsedInputSpec {
 	mode: CRInputSyntaxMode;
 	raw: string;
 	target: string;
-	targetKind: 'yaml' | 'global';
+	targetKind: 'yaml' | 'global' | 'temp';
 	explicitControlType?: CRInputControlType;
 	options: Record<string, CRInputOptionValue>;
 }
@@ -193,6 +193,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 	private readonly dynamicRenderBindings = new WeakMap<HTMLElement, DynamicRenderBinding>();
 	private readonly dynamicRenderElements = new Set<HTMLElement>();
 	private readonly expressionFnCache = new Map<string, Function | null>();
+	private readonly tempVariableStore = new Map<string, Record<string, unknown>>();
 	private refreshTimer: number | null = null;
 	private dynamicRefreshRaf: number | null = null;
 	private dynamicRefreshFallbackTimer: number | null = null;
@@ -202,12 +203,13 @@ export default class ConditionalRenderPlugin extends Plugin {
 	async onload() {
 		await this.loadSettings();
 		this.addSettingTab(new CRSettingTab(this.app, this));
-		console.log(t('log_loaded').replace('0.12.0', '0.16.0'));
+		console.log(t('log_loaded').replace('0.12.0', '0.18.0'));
 
 		this.registerProcessors();
 
 		this.registerEvent(
 			this.app.metadataCache.on('changed', (file) => {
+				this.syncTempStoreFromFrontmatter(file.path);
 				this.scheduleSyncByPath(file.path, { immediate: true, delayed: true });
 				this.scheduleDynamicRefresh(file.path);
 			}),
@@ -812,7 +814,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			const target = raw;
 			const targetKind = this.getTargetKind(target);
 			if (!targetKind) {
-				return { ok: false, message: `Invalid legacy target "${target}". Use a variable name or this.key` };
+				return { ok: false, message: `Invalid legacy target "${target}". Use a variable name, this.key, or temp.key` };
 			}
 			return {
 				ok: true,
@@ -852,7 +854,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		const target = items[0].trim();
 		const targetKind = this.getTargetKind(target);
 		if (!targetKind) {
-			return { ok: false, message: `Invalid target "${target}". Use a variable name or this.key` };
+			return { ok: false, message: `Invalid target "${target}". Use a variable name, this.key, or temp.key` };
 		}
 
 		const options: Record<string, CRInputOptionValue> = {};
@@ -898,8 +900,9 @@ export default class ConditionalRenderPlugin extends Plugin {
 		};
 	}
 
-	private getTargetKind(target: string): 'yaml' | 'global' | null {
+	private getTargetKind(target: string): 'yaml' | 'global' | 'temp' | null {
 		if (target.startsWith('this.') && target.length > 5) return 'yaml';
+		if (target.startsWith('temp.') && target.length > 5) return 'temp';
 		if (isValidVarName(target)) return 'global';
 		return null;
 	}
@@ -1108,6 +1111,38 @@ export default class ConditionalRenderPlugin extends Plugin {
 			let value: unknown = globalVar.value;
 			if (valueType === 'boolean') value = globalVar.value === 'true';
 			else if (valueType === 'number') value = globalVar.value === '' ? '' : Number(globalVar.value);
+			return { ok: true, controlType, valueType, value, options: spec.options, selectOptions };
+		}
+
+		if (spec.targetKind === 'temp') {
+			const tempKey = spec.target.slice(5).trim();
+			const currentValue = this.getTempVariableValue(sourcePath, tempKey);
+			const inferredType: CRInputValueType =
+				typeof currentValue === 'boolean'
+					? 'boolean'
+					: typeof currentValue === 'number'
+						? 'number'
+						: 'string';
+			const valueType = explicitValueType ?? inferredType;
+			const controlType = spec.explicitControlType ?? this.getDefaultControlTypeForValueType(valueType);
+			let selectOptions: string[] | undefined;
+			if (controlType === 'select') {
+				const resolvedSelectOptions = this.resolveSelectOptionsFromRawOptions(spec.options);
+				if (!resolvedSelectOptions.ok) {
+					return { ok: false, message: resolvedSelectOptions.message };
+				}
+				selectOptions = resolvedSelectOptions.value;
+			}
+
+			let value: unknown = currentValue;
+			if (value === undefined || value === null) {
+				value = valueType === 'boolean' ? false : '';
+			}
+			if (valueType === 'number' && typeof value === 'number' && !Number.isFinite(value)) value = '';
+			if (valueType === 'number' && typeof value === 'string') value = value.trim();
+			if (valueType === 'boolean' && typeof value !== 'boolean') value = value === true;
+			if (valueType === 'string' && typeof value !== 'string') value = String(value ?? '');
+
 			return { ok: true, controlType, valueType, value, options: spec.options, selectOptions };
 		}
 
@@ -1554,6 +1589,14 @@ export default class ConditionalRenderPlugin extends Plugin {
 			return;
 		}
 
+		if (binding.spec.targetKind === 'temp') {
+			const tempKey = binding.spec.target.slice(5).trim();
+			await this.setTempVariableValue(binding.sourcePath, tempKey, newValue);
+			this.scheduleSyncByPath(binding.sourcePath, { immediate: true, delayed: true });
+			this.scheduleDynamicRefresh(binding.sourcePath);
+			return;
+		}
+
 		const targetVar = this.settings.variables.find((v) => v.name === binding.spec.target);
 		if (!targetVar) return;
 		if (targetVar.type !== valueType) return;
@@ -1588,7 +1631,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 	) {
 		const binding = this.inputBindings.get(controlEl);
 		if (!binding) return;
-		if (changedPath && binding.spec.targetKind === 'yaml' && binding.sourcePath !== changedPath) return;
+		if (changedPath && (binding.spec.targetKind === 'yaml' || binding.spec.targetKind === 'temp') && binding.sourcePath !== changedPath) return;
 
 		const state = this.getInputState(controlEl);
 		if (options.skipActiveControls) {
@@ -1798,13 +1841,14 @@ export default class ConditionalRenderPlugin extends Plugin {
 		if (options.refreshViews) this.requestDebouncedRefresh(options.changedPath);
 	}
 
-	buildContext(): Record<string, unknown> {
+	buildContext(sourcePath?: string): Record<string, unknown> {
 		const ctx: Record<string, unknown> = {};
 		for (const variable of this.settings.variables) {
 			if (variable.type === 'number') ctx[variable.name] = Number(variable.value);
 			else if (variable.type === 'boolean') ctx[variable.name] = variable.value === 'true';
 			else ctx[variable.name] = variable.value;
 		}
+		ctx.temp = sourcePath ? this.getTempVariablesForPath(sourcePath) : {};
 		return ctx;
 	}
 
@@ -1817,8 +1861,61 @@ export default class ConditionalRenderPlugin extends Plugin {
 		return {};
 	}
 
+	private cloneTempRecord(value: unknown): Record<string, unknown> {
+		if (!value || typeof value !== 'object' || Array.isArray(value)) return {};
+		return { ...(value as Record<string, unknown>) };
+	}
+
+	private usesYamlBackedTemp(sourcePath: string): boolean {
+		return this.getFrontmatter(sourcePath).allow_temp_from_cr === true;
+	}
+
+	private syncTempStoreFromFrontmatter(sourcePath: string) {
+		if (!sourcePath) return;
+		if (!this.usesYamlBackedTemp(sourcePath)) return;
+		const fm = this.getFrontmatter(sourcePath);
+		this.tempVariableStore.set(sourcePath, this.cloneTempRecord(fm.cr_temp));
+	}
+
+	private ensureTempStore(sourcePath: string): Record<string, unknown> {
+		const existing = this.tempVariableStore.get(sourcePath);
+		if (existing) return existing;
+		const initial = this.usesYamlBackedTemp(sourcePath)
+			? this.cloneTempRecord(this.getFrontmatter(sourcePath).cr_temp)
+			: {};
+		this.tempVariableStore.set(sourcePath, initial);
+		return initial;
+	}
+
+	private getTempVariablesForPath(sourcePath: string): Record<string, unknown> {
+		return { ...this.ensureTempStore(sourcePath) };
+	}
+
+	private getTempVariableValue(sourcePath: string, key: string): unknown {
+		return this.ensureTempStore(sourcePath)[key];
+	}
+
+	private async setTempVariableValue(sourcePath: string, key: string, value: unknown) {
+		const store = this.ensureTempStore(sourcePath);
+		store[key] = value;
+
+		if (!this.usesYamlBackedTemp(sourcePath)) return;
+
+		const file = this.app.vault.getAbstractFileByPath(sourcePath);
+		if (!(file instanceof TFile)) return;
+
+		await this.app.fileManager.processFrontMatter(file, (fm) => {
+			const existing = fm.cr_temp;
+			const next = existing && typeof existing === 'object' && !Array.isArray(existing)
+				? { ...(existing as Record<string, unknown>) }
+				: {};
+			next[key] = value;
+			fm.cr_temp = next;
+		});
+	}
+
 	evaluateExpression(expression: string, sourcePath: string): unknown {
-		const context = this.buildContext();
+		const context = this.buildContext(sourcePath);
 		const keys = Object.keys(context);
 		const values = Object.values(context);
 		const frontmatter = this.getFrontmatter(sourcePath);
@@ -1863,7 +1960,7 @@ class CRSettingTab extends PluginSettingTab {
 	display(): void {
 		const { containerEl } = this;
 		containerEl.empty();
-		containerEl.createEl('h2', { text: t('settings_title').replace('0.12.0', '0.15.1') });
+		containerEl.createEl('h2', { text: t('settings_title').replace('0.12.0', '0.18.0') });
 
 		new Setting(containerEl)
 			.setName(t('plugin_identifier_name'))
