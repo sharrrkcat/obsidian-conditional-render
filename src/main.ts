@@ -43,7 +43,12 @@ export type CRHiddenStyle =
 
 type CRInputValueType = 'string' | 'number' | 'boolean';
 type CRInputControlType = 'string' | 'number' | 'boolean' | 'textarea' | 'select' | 'calendar' | 'random';
-type CRInputOptionValue = string | number | boolean | string[];
+type CRSelectOptionPair = [string, string];
+interface CRSelectOptionItem {
+	label: string;
+	value: string;
+}
+type CRInputOptionValue = string | number | boolean | string[] | CRSelectOptionPair[];
 type CRControlElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
 type CRInputSyntaxMode = 'typed' | 'legacy';
 
@@ -833,7 +838,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		if (!typedMatch) {
 			return {
 				ok: false,
-				message: 'Invalid typed syntax. Use cr-input: bool(name) / string(name) / number(this.score) / textarea(note) / select(status, options=["a","b"]) / select(status, optionsFrom=myList) / calendar(date, format="YYYY-MM-DD") / random(temp.roll, range="[1,20]", decimals=0)',
+				message: 'Invalid typed syntax. Use cr-input: bool(name) / string(name) / number(this.score) / textarea(note) / select(status, options=["a","b"]) / select(choice, options=[["Ask","ask"],["Leave","leave"]]) / select(status, optionsFrom=myList) / calendar(date, format="YYYY-MM-DD") / random(temp.roll, range="[1,20]", decimals=0)',
 			};
 		}
 
@@ -986,8 +991,17 @@ export default class ConditionalRenderPlugin extends Plugin {
 		if (trimmed.startsWith('[') && trimmed.endsWith(']')) {
 			try {
 				const parsed = JSON.parse(trimmed);
-				if (Array.isArray(parsed) && parsed.every((item) => typeof item === 'string')) {
-					return parsed;
+				if (Array.isArray(parsed)) {
+					if (parsed.every((item) => typeof item === 'string')) {
+						return parsed as string[];
+					}
+					if (
+						parsed.every(
+							(item) => Array.isArray(item) && item.length === 2 && typeof item[0] === 'string' && typeof item[1] === 'string',
+						)
+					) {
+						return parsed as CRSelectOptionPair[];
+					}
 				}
 			} catch {
 				// fall through
@@ -997,33 +1011,71 @@ export default class ConditionalRenderPlugin extends Plugin {
 		return trimmed;
 	}
 
-	private normalizeSelectOptions(value: CRInputOptionValue | undefined): string[] | null {
+	private normalizeSelectOptions(value: CRInputOptionValue | undefined): CRSelectOptionItem[] | null {
 		if (!Array.isArray(value)) return null;
-		const normalized = value.filter((item): item is string => typeof item === 'string').map((item) => item.trim()).filter(Boolean);
-		return normalized.length > 0 ? normalized : null;
+
+		if (value.every((item) => typeof item === 'string')) {
+			const normalized = (value as string[])
+				.map((item) => item.trim())
+				.filter(Boolean)
+				.map((item) => ({ label: item, value: item }));
+			return normalized.length > 0 ? normalized : null;
+		}
+
+		if (
+			value.every(
+				(item) => Array.isArray(item) && item.length === 2 && typeof item[0] === 'string' && typeof item[1] === 'string',
+			)
+		) {
+			const normalized = (value as CRSelectOptionPair[])
+				.map(([label, optionValue]) => ({ label: label.trim(), value: optionValue.trim() }))
+				.filter((item) => item.label && item.value);
+			return normalized.length > 0 ? normalized : null;
+		}
+
+		return null;
 	}
 
-	private parseSelectOptionsString(rawValue: string): string[] | null {
+	private parseSelectOptionsString(rawValue: string): CRSelectOptionItem[] | null {
 		const text = rawValue.trim();
 		if (!text) return null;
 
 		if (text.startsWith('[') && text.endsWith(']')) {
 			try {
 				const parsed = JSON.parse(text);
-				if (Array.isArray(parsed) && parsed.every((item) => typeof item === 'string')) {
-					const normalized = parsed.map((item) => item.trim()).filter(Boolean);
-					return normalized.length > 0 ? normalized : null;
+				if (Array.isArray(parsed)) {
+					if (parsed.every((item) => typeof item === 'string')) {
+						const normalized = parsed
+							.map((item) => item.trim())
+							.filter(Boolean)
+							.map((item) => ({ label: item, value: item }));
+						return normalized.length > 0 ? normalized : null;
+					}
+					if (
+						parsed.every(
+							(item) => Array.isArray(item) && item.length === 2 && typeof item[0] === 'string' && typeof item[1] === 'string',
+						)
+					) {
+						const normalized = (parsed as CRSelectOptionPair[])
+							.map(([label, optionValue]) => ({ label: label.trim(), value: optionValue.trim() }))
+							.filter((item) => item.label && item.value);
+						return normalized.length > 0 ? normalized : null;
+					}
 				}
 			} catch {
 				return null;
 			}
 		}
 
-		const normalized = text.split(',').map((item) => item.trim()).filter(Boolean);
+		const normalized = text
+			.split(',')
+			.map((item) => item.trim())
+			.filter(Boolean)
+			.map((item) => ({ label: item, value: item }));
 		return normalized.length > 0 ? normalized : null;
 	}
 
-	private resolveSelectOptionsFromRawOptions(options: Record<string, CRInputOptionValue>): { ok: true; value: string[] } | { ok: false; message: string } {
+	private resolveSelectOptionsFromRawOptions(options: Record<string, CRInputOptionValue>): { ok: true; value: CRSelectOptionItem[] } | { ok: false; message: string } {
 		const inlineOptions = this.normalizeSelectOptions(options.options);
 		if (inlineOptions && inlineOptions.length > 0) {
 			return { ok: true, value: inlineOptions };
@@ -1044,12 +1096,12 @@ export default class ConditionalRenderPlugin extends Plugin {
 			}
 			const parsed = this.parseSelectOptionsString(sourceVar.value);
 			if (!parsed || parsed.length === 0) {
-				return { ok: false, message: `optionsFrom source "${varName}" must be "a,b,c" or ["a","b","c"]` };
+				return { ok: false, message: `optionsFrom source "${varName}" must be "a,b,c", ["a","b","c"], or [["Label","value"],["Label 2","value2"]]` };
 			}
 			return { ok: true, value: parsed };
 		}
 
-		return { ok: false, message: 'select(...) requires options=["option1","option2"] or optionsFrom=globalVar' };
+		return { ok: false, message: 'select(...) requires options=["option1","option2"] / options=[["Label","value"],["Label 2","value2"]] or optionsFrom=globalVar' };
 	}
 
 	private getCalendarFormat(options: Record<string, CRInputOptionValue>): string {
@@ -1155,7 +1207,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 	}
 
 	private resolveInputBinding(binding: InputBinding):
-		| { ok: true; controlType: CRInputControlType; valueType: CRInputValueType; value: unknown; options: ParsedInputSpec['options']; selectOptions?: string[] }
+		| { ok: true; controlType: CRInputControlType; valueType: CRInputValueType; value: unknown; options: ParsedInputSpec['options']; selectOptions?: CRSelectOptionItem[] }
 		| { ok: false; message: string } {
 		const { spec, sourcePath } = binding;
 		const explicitValueType = spec.explicitControlType ? this.getExplicitValueType(spec.explicitControlType) : undefined;
@@ -1175,7 +1227,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 			const valueType = explicitValueType ?? globalVar.type;
 			const controlType = spec.explicitControlType ?? this.getDefaultControlTypeForValueType(valueType);
-			let selectOptions: string[] | undefined;
+			let selectOptions: CRSelectOptionItem[] | undefined;
 			if (controlType === 'select') {
 				const resolvedSelectOptions = this.resolveSelectOptionsFromRawOptions(spec.options);
 				if (!resolvedSelectOptions.ok) {
@@ -1201,7 +1253,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 						: 'string';
 			const valueType = explicitValueType ?? inferredType;
 			const controlType = spec.explicitControlType ?? this.getDefaultControlTypeForValueType(valueType);
-			let selectOptions: string[] | undefined;
+			let selectOptions: CRSelectOptionItem[] | undefined;
 			if (controlType === 'select') {
 				const resolvedSelectOptions = this.resolveSelectOptionsFromRawOptions(spec.options);
 				if (!resolvedSelectOptions.ok) {
@@ -1233,7 +1285,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 					: 'string';
 		const valueType = explicitValueType ?? inferredType;
 		const controlType = spec.explicitControlType ?? this.getDefaultControlTypeForValueType(valueType);
-		let selectOptions: string[] | undefined;
+		let selectOptions: CRSelectOptionItem[] | undefined;
 		if (controlType === 'select') {
 			const resolvedSelectOptions = this.resolveSelectOptionsFromRawOptions(spec.options);
 			if (!resolvedSelectOptions.ok) {
@@ -1795,12 +1847,12 @@ export default class ConditionalRenderPlugin extends Plugin {
 		}
 	}
 
-	private applySelectOptions(controlEl: HTMLSelectElement, normalizedOptions: string[], options: Record<string, CRInputOptionValue>, currentValue: string) {
+	private applySelectOptions(controlEl: HTMLSelectElement, normalizedOptions: CRSelectOptionItem[], options: Record<string, CRInputOptionValue>, currentValue: string) {
 		const placeholder = typeof options.placeholder === 'string' ? options.placeholder : '';
 		const displayMode = this.getSelectDisplayMode(options);
 		const values = [...normalizedOptions];
-		if (currentValue && !values.includes(currentValue)) {
-			values.unshift(currentValue);
+		if (currentValue && !values.some((item) => item.value === currentValue)) {
+			values.unshift({ label: currentValue, value: currentValue });
 		}
 
 		const signature = JSON.stringify({ values, placeholder, currentValue, displayMode });
@@ -1812,10 +1864,10 @@ export default class ConditionalRenderPlugin extends Plugin {
 				placeholderOption.textContent = placeholder;
 				controlEl.appendChild(placeholderOption);
 			}
-			for (const optionValue of values) {
+			for (const optionItem of values) {
 				const optionEl = document.createElement('option');
-				optionEl.value = optionValue;
-				optionEl.textContent = optionValue;
+				optionEl.value = optionItem.value;
+				optionEl.textContent = optionItem.label;
 				controlEl.appendChild(optionEl);
 			}
 			controlEl.dataset.crOptionsSignature = signature;
@@ -1838,7 +1890,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		controlType: CRInputControlType,
 		options: Record<string, CRInputOptionValue>,
 		currentValue: string,
-		selectOptions?: string[],
+		selectOptions?: CRSelectOptionItem[],
 	) {
 		const placeholder = typeof options.placeholder === 'string' ? options.placeholder : '';
 
