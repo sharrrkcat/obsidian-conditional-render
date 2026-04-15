@@ -138,3 +138,26 @@
 	line-height: 1.5;
 	white-space: nowrap;
 }
+
+/* ========================================== */
+/* 0.19.0B global hover reveal toggle         */
+/* ========================================== */
+.cr-no-hover-reveal.cr-hidden-underline:hover { color: transparent !important; border-bottom-color: var(--text-muted) !important; }
+.cr-no-hover-reveal.cr-hidden-blank:hover { color: transparent !important; }
+.cr-no-hover-reveal.cr-hidden-spoiler:hover,
+.cr-no-hover-reveal.cr-hidden-spoiler-round:hover,
+.cr-no-hover-reveal.cr-hidden-spoiler-white:hover,
+.cr-no-hover-reveal.cr-hidden-spoiler-white-round:hover { background-color: inherit !important; color: transparent !important; }
+
+.cr-block-underline.cr-no-hover-reveal:hover > * { color: transparent !important; border-bottom-color: var(--text-muted) !important; }
+.cr-block-underline.cr-no-hover-reveal:hover > * * { color: transparent !important; }
+.cr-block-blank.cr-no-hover-reveal:hover > * { color: transparent !important; }
+.cr-block-blank.cr-no-hover-reveal:hover > * * { color: transparent !important; }
+.cr-block-spoiler.cr-no-hover-reveal:hover > *,
+.cr-block-spoiler-round.cr-no-hover-reveal:hover > *,
+.cr-block-spoiler-white.cr-no-hover-reveal:hover > *,
+.cr-block-spoiler-white-round.cr-no-hover-reveal:hover > * { background-color: inherit !important; color: transparent !important; }
+.cr-block-spoiler.cr-no-hover-reveal:hover > * *,
+.cr-block-spoiler-round.cr-no-hover-reveal:hover > * *,
+.cr-block-spoiler-white.cr-no-hover-reveal:hover > * *,
+.cr-block-spoiler-white-round.cr-no-hover-reveal:hover > * * { color: transparent !important; }

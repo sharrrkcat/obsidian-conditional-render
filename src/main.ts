@@ -57,6 +57,7 @@ interface ConditionalRenderSettings {
 	identifier: string;
 	hiddenStyle: CRHiddenStyle;
 	hiddenCustomText: string;
+	revealOnHover: boolean;
 	defaultVariable: string;
 	variables: CRVariable[];
 }
@@ -102,6 +103,7 @@ const DEFAULT_SETTINGS: ConditionalRenderSettings = {
 	identifier: 'cr',
 	hiddenStyle: 'none',
 	hiddenCustomText: '[内容已隐藏]',
+	revealOnHover: true,
 	defaultVariable: 'plugin_status',
 	variables: [
 		{ name: 'plugin_status', type: 'boolean', value: 'true' },
@@ -685,7 +687,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			return;
 		}
 
-		containerEl.className = `cr-hidden-${style}`;
+		containerEl.className = `cr-hidden-${style}${this.settings.revealOnHover ? '' : ' cr-no-hover-reveal'}`;
 		containerEl.textContent = originalText;
 	}
 
@@ -711,7 +713,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			return;
 		}
 
-		containerEl.className = `cr-block-${style}`;
+		containerEl.className = `cr-block-${style}${this.settings.revealOnHover ? '' : ' cr-no-hover-reveal'}`;
 		void this.renderDynamicMarkdown(containerEl, originalMarkdown, sourcePath);
 	}
 
@@ -2268,7 +2270,23 @@ class CRSettingTab extends PluginSettingTab {
 	}
 
 	private getSettingsScrollContainer(): HTMLElement {
-		return (this.containerEl.closest('.vertical-tab-content-container') as HTMLElement | null) ?? this.containerEl.parentElement ?? this.containerEl;
+		return (this.containerEl.closest('.vertical-tab-content-container') as HTMLElement | null)
+			?? (this.containerEl.closest('.vertical-tab-content') as HTMLElement | null)
+			?? this.containerEl.parentElement
+			?? this.containerEl;
+	}
+
+	private getSettingsScrollRestoreTargets(): HTMLElement[] {
+		const targets: HTMLElement[] = [];
+		let current: HTMLElement | null = this.containerEl;
+		while (current) {
+			const style = window.getComputedStyle(current);
+			const canScroll = ['auto', 'scroll', 'overlay'].includes(style.overflowY) || current.classList.contains('vertical-tab-content-container') || current.classList.contains('vertical-tab-content');
+			if (canScroll) targets.push(current);
+			current = current.parentElement;
+		}
+		if (targets.length === 0) targets.push(this.getSettingsScrollContainer());
+		return Array.from(new Set(targets));
 	}
 
 	private normalizeImportedVariables(parsed: unknown): CRVariable[] {
@@ -2328,8 +2346,8 @@ class CRSettingTab extends PluginSettingTab {
 
 	display(): void {
 		const { containerEl } = this;
-		const scrollContainer = this.getSettingsScrollContainer();
-		const previousScrollTop = scrollContainer.scrollTop;
+		const scrollTargets = this.getSettingsScrollRestoreTargets();
+		const previousScrolls = scrollTargets.map((el) => ({ el, top: el.scrollTop }));
 		containerEl.empty();
 		containerEl.createEl('h2', { text: t('settings_title') });
 
@@ -2370,6 +2388,16 @@ class CRSettingTab extends PluginSettingTab {
 						await this.plugin.saveSettings({ refreshViews: true, refreshDynamic: true });
 						this.display();
 					});
+			});
+
+		new Setting(containerEl)
+			.setName(t('reveal_on_hover_name'))
+			.setDesc(t('reveal_on_hover_desc'))
+			.addToggle((toggle) => {
+				toggle.setValue(this.plugin.settings.revealOnHover).onChange(async (value) => {
+					this.plugin.settings.revealOnHover = value;
+					await this.plugin.saveSettings({ refreshViews: true, refreshDynamic: true });
+				});
 			});
 
 		if (this.plugin.settings.hiddenStyle === 'text' || this.plugin.settings.hiddenStyle === 'text-grey') {
@@ -2544,6 +2572,22 @@ class CRSettingTab extends PluginSettingTab {
 		containerEl.createEl('hr');
 		new Setting(containerEl).setName(t('import_export_name')).setDesc(t('import_export_desc'));
 
+		const importModeSetting = new Setting(containerEl)
+			.setName(t('import_mode_name'))
+			.setDesc(t('import_mode_desc'));
+
+		importModeSetting.addDropdown((drop) => {
+			drop.selectEl.style.width = '180px';
+			drop
+				.addOption('update', t('import_mode_opt_update'))
+				.addOption('merge', t('import_mode_opt_merge'))
+				.addOption('overwrite', t('import_mode_opt_overwrite'))
+				.setValue(this.importMode)
+				.onChange((value: CRImportMode) => {
+					this.importMode = value;
+				});
+		});
+
 		const ioContainer = containerEl.createDiv();
 		const ioTextArea = new TextAreaComponent(ioContainer);
 		ioTextArea.inputEl.style.width = '100%';
@@ -2564,22 +2608,6 @@ class CRSettingTab extends PluginSettingTab {
 			this.importExportText = json;
 		});
 
-		const importModeSetting = new Setting(containerEl)
-			.setName(t('import_mode_name'))
-			.setDesc(t('import_mode_desc'));
-
-		importModeSetting.addDropdown((drop) => {
-			drop.selectEl.style.width = '180px';
-			drop
-				.addOption('update', t('import_mode_opt_update'))
-				.addOption('merge', t('import_mode_opt_merge'))
-				.addOption('overwrite', t('import_mode_opt_overwrite'))
-				.setValue(this.importMode)
-				.onChange((value: CRImportMode) => {
-					this.importMode = value;
-				});
-		});
-
 		btnContainer.createEl('button', { text: t('btn_import'), cls: 'mod-cta' }).addEventListener('click', async () => {
 			try {
 				const imported = this.normalizeImportedVariables(JSON.parse(this.importExportText));
@@ -2593,9 +2621,12 @@ class CRSettingTab extends PluginSettingTab {
 		});
 
 		window.requestAnimationFrame(() => {
-			scrollContainer.scrollTop = previousScrollTop;
+			for (const item of previousScrolls) item.el.scrollTop = item.top;
 			window.setTimeout(() => {
-				scrollContainer.scrollTop = previousScrollTop;
+				for (const item of previousScrolls) item.el.scrollTop = item.top;
+				window.requestAnimationFrame(() => {
+					for (const item of previousScrolls) item.el.scrollTop = item.top;
+				});
 			}, 0);
 		});
 	}
