@@ -545,7 +545,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 	):
 		| { ok: true; value: { condition: string; visibleText: string; hiddenTextOverride?: string } }
 		| { ok: false; message: string } {
-		const segments = this.splitTopLevelPipe(raw, allowHiddenOverride ? 3 : 2).map((segment) => segment.trim());
+		const segments = this.splitTopLevelPipe(raw, 3).map((segment) => segment.trim());
 		if (segments.length < 2 || !segments[0] || !segments[1]) {
 			return { ok: false, message: `Invalid inline conditional syntax. Use ${this.settings.identifier}-if: condition | text` };
 		}
@@ -553,7 +553,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			condition: segments[0],
 			visibleText: segments[1],
 		};
-		if (allowHiddenOverride && segments[2]) {
+		if (segments[2]) {
 			value.hiddenTextOverride = segments[2];
 		}
 		return { ok: true, value };
@@ -676,7 +676,10 @@ export default class ConditionalRenderPlugin extends Plugin {
 			return;
 		}
 
-		containerEl.title = originalText;
+		const hiddenText = hiddenTextOverride && hiddenTextOverride.trim() ? hiddenTextOverride : originalText;
+		if (this.settings.revealOnHover) containerEl.title = hiddenText;
+		else containerEl.removeAttribute('title');
+
 		if (isTextHiddenStyle(style)) {
 			containerEl.className = style === 'text-grey' || style === 'text-gray' ? 'cr-hidden-text-grey' : 'cr-hidden-text';
 			MarkdownRenderer.renderMarkdown(this.getHiddenReplacementText(hiddenTextOverride), containerEl, sourcePath, this).then(() => {
@@ -688,7 +691,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		}
 
 		containerEl.className = `cr-hidden-${style}${this.settings.revealOnHover ? '' : ' cr-no-hover-reveal'}`;
-		containerEl.textContent = originalText;
+		containerEl.textContent = hiddenText;
 	}
 
 	private renderHiddenBlockInto(
@@ -705,6 +708,8 @@ export default class ConditionalRenderPlugin extends Plugin {
 			return;
 		}
 
+		const hiddenMarkdown = hiddenTextOverride && hiddenTextOverride.trim() ? hiddenTextOverride : originalMarkdown;
+
 		if (isTextHiddenStyle(style)) {
 			containerEl.className = style === 'text-grey' || style === 'text-gray' ? 'cr-block-text-grey' : 'cr-block-text';
 			void this.renderDynamicMarkdown(containerEl, this.getHiddenReplacementText(hiddenTextOverride), sourcePath).then(() => {
@@ -714,7 +719,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 		}
 
 		containerEl.className = `cr-block-${style}${this.settings.revealOnHover ? '' : ' cr-no-hover-reveal'}`;
-		void this.renderDynamicMarkdown(containerEl, originalMarkdown, sourcePath);
+		void this.renderDynamicMarkdown(containerEl, hiddenMarkdown, sourcePath);
 	}
 
 	private registerDynamicRender(element: HTMLElement, binding: DynamicRenderBinding) {

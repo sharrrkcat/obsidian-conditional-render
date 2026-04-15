@@ -161,3 +161,29 @@
 .cr-block-spoiler-round.cr-no-hover-reveal:hover > * *,
 .cr-block-spoiler-white.cr-no-hover-reveal:hover > * *,
 .cr-block-spoiler-white-round.cr-no-hover-reveal:hover > * * { color: transparent !important; }
+
+
+/* ========================================== */
+/* 0.19.0C hover-off fix                      */
+/* ========================================== */
+.cr-no-hover-reveal.cr-hidden-spoiler:hover,
+.cr-no-hover-reveal.cr-hidden-spoiler-round:hover {
+	background-color: #000 !important;
+	color: transparent !important;
+}
+.cr-no-hover-reveal.cr-hidden-spoiler-white:hover,
+.cr-no-hover-reveal.cr-hidden-spoiler-white-round:hover {
+	background-color: #fff !important;
+	color: transparent !important;
+}
+
+.cr-block-spoiler.cr-no-hover-reveal:hover > *,
+.cr-block-spoiler-round.cr-no-hover-reveal:hover > * {
+	background-color: #000 !important;
+	color: transparent !important;
+}
+.cr-block-spoiler-white.cr-no-hover-reveal:hover > *,
+.cr-block-spoiler-white-round.cr-no-hover-reveal:hover > * {
+	background-color: #fff !important;
+	color: transparent !important;
+}
