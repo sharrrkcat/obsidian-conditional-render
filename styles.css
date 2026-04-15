@@ -187,3 +187,120 @@
 	background-color: #fff !important;
 	color: transparent !important;
 }
+
+
+/* ========================================== */
+/* 0.20.0 image-aware hidden styles           */
+/* ========================================== */
+
+.cr-hidden-media-inline {
+	display: inline-block;
+	position: relative;
+	max-width: 100%;
+	line-height: 0;
+	vertical-align: middle;
+	overflow: hidden;
+	cursor: pointer;
+	user-select: none;
+}
+
+.cr-hidden-media-inline .cr-hidden-media-content {
+	display: inline-block;
+	max-width: 100%;
+	opacity: 0;
+	transition: opacity 0.2s ease;
+}
+
+.cr-hidden-media-inline .cr-hidden-media-content img {
+	display: block;
+	max-width: 100%;
+	height: auto;
+}
+
+.cr-hidden-media-inline .cr-hidden-media-overlay {
+	position: absolute;
+	inset: 0;
+	pointer-events: none;
+	transition: opacity 0.2s ease, background-color 0.2s ease;
+}
+
+.cr-hidden-media-inline.cr-hidden-media-spoiler .cr-hidden-media-overlay,
+.cr-hidden-media-inline.cr-hidden-media-spoiler-round .cr-hidden-media-overlay {
+	background-color: #000;
+}
+
+.cr-hidden-media-inline.cr-hidden-media-spoiler-white .cr-hidden-media-overlay,
+.cr-hidden-media-inline.cr-hidden-media-spoiler-white-round .cr-hidden-media-overlay {
+	background-color: #fff;
+}
+
+.cr-hidden-media-inline.cr-hidden-media-spoiler-round,
+.cr-hidden-media-inline.cr-hidden-media-spoiler-round .cr-hidden-media-overlay,
+.cr-hidden-media-inline.cr-hidden-media-spoiler-white-round,
+.cr-hidden-media-inline.cr-hidden-media-spoiler-white-round .cr-hidden-media-overlay {
+	border-radius: 4px;
+}
+
+.cr-hidden-media-inline:not(.cr-no-hover-reveal):hover .cr-hidden-media-content {
+	opacity: 1;
+}
+
+.cr-hidden-media-inline:not(.cr-no-hover-reveal):hover .cr-hidden-media-overlay {
+	opacity: 0;
+}
+
+.cr-block-media-mask {
+	position: relative;
+	display: block;
+	max-width: 100%;
+	overflow: hidden;
+	cursor: pointer;
+	user-select: none;
+	margin: 1em 0;
+}
+
+.cr-block-media-mask .cr-block-media-mask-content {
+	position: relative;
+	z-index: 1;
+	max-width: 100%;
+	opacity: 0;
+	transition: opacity 0.2s ease;
+}
+
+.cr-block-media-mask .cr-block-media-mask-content img {
+	max-width: 100%;
+	height: auto;
+}
+
+.cr-block-media-mask .cr-block-media-mask-overlay {
+	position: absolute;
+	inset: 0;
+	z-index: 2;
+	pointer-events: none;
+	transition: opacity 0.2s ease, background-color 0.2s ease;
+}
+
+.cr-block-media-mask.cr-block-media-mask-spoiler .cr-block-media-mask-overlay,
+.cr-block-media-mask.cr-block-media-mask-spoiler-round .cr-block-media-mask-overlay {
+	background-color: #000;
+}
+
+.cr-block-media-mask.cr-block-media-mask-spoiler-white .cr-block-media-mask-overlay,
+.cr-block-media-mask.cr-block-media-mask-spoiler-white-round .cr-block-media-mask-overlay {
+	background-color: #fff;
+}
+
+.cr-block-media-mask.cr-block-media-mask-spoiler-round,
+.cr-block-media-mask.cr-block-media-mask-spoiler-round .cr-block-media-mask-overlay,
+.cr-block-media-mask.cr-block-media-mask-spoiler-white-round,
+.cr-block-media-mask.cr-block-media-mask-spoiler-white-round .cr-block-media-mask-overlay {
+	border-radius: 4px;
+}
+
+.cr-block-media-mask:not(.cr-no-hover-reveal):hover .cr-block-media-mask-content {
+	opacity: 1;
+}
+
+.cr-block-media-mask:not(.cr-no-hover-reveal):hover .cr-block-media-mask-overlay {
+	opacity: 0;
+}

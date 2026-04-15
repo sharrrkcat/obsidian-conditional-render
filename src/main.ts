@@ -567,6 +567,60 @@ export default class ConditionalRenderPlugin extends Plugin {
 		});
 	}
 
+	private normalizeMediaRevealStyle(style: CRHiddenStyle): CRHiddenStyle {
+		return style === 'underline' ? 'blank' : style;
+	}
+
+	private supportsRealImageHiddenStyle(style: CRHiddenStyle): boolean {
+		const normalized = this.normalizeMediaRevealStyle(style);
+		return normalized === 'blank'
+			|| normalized === 'spoiler'
+			|| normalized === 'spoiler-round'
+			|| normalized === 'spoiler-white'
+			|| normalized === 'spoiler-white-round';
+	}
+
+	private tryResolveSingleImageEmbed(markdown: string, sourcePath: string): string | null {
+		const trimmed = markdown.trim();
+		const match = trimmed.match(/^!\[\[([^\]]+)\]\]$/);
+		if (!match) return null;
+		return this.resolveImageEmbedHtml(match[1], sourcePath);
+	}
+
+	private renderHiddenInlineImageInto(
+		containerEl: HTMLElement,
+		style: CRHiddenStyle,
+		imageMarkdown: string,
+		sourcePath: string,
+	) {
+		this.clearDynamicContainer(containerEl);
+		containerEl.removeAttribute('title');
+		const normalized = this.normalizeMediaRevealStyle(style);
+		const imageHtml = this.tryResolveSingleImageEmbed(imageMarkdown, sourcePath);
+		if (!imageHtml) {
+			containerEl.className = `cr-hidden-${normalized}${this.settings.revealOnHover ? '' : ' cr-no-hover-reveal'}`;
+			containerEl.textContent = imageMarkdown;
+			return;
+		}
+		containerEl.className = `cr-hidden-media-inline cr-hidden-media-${normalized}${this.settings.revealOnHover ? '' : ' cr-no-hover-reveal'}`;
+		containerEl.innerHTML = `<span class="cr-hidden-media-content">${imageHtml}</span><span class="cr-hidden-media-overlay" aria-hidden="true"></span>`;
+	}
+
+	private async renderHiddenBlockMediaMaskInto(
+		containerEl: HTMLElement,
+		style: CRHiddenStyle,
+		markdown: string,
+		sourcePath: string,
+	) {
+		this.clearDynamicContainer(containerEl);
+		containerEl.removeAttribute('title');
+		const normalized = this.normalizeMediaRevealStyle(style);
+		containerEl.className = `cr-block-media-mask cr-block-media-mask-${normalized}${this.settings.revealOnHover ? '' : ' cr-no-hover-reveal'}`;
+		const contentEl = containerEl.createDiv({ cls: 'cr-block-media-mask-content' });
+		await this.renderDynamicMarkdown(contentEl, markdown, sourcePath);
+		containerEl.createDiv({ cls: 'cr-block-media-mask-overlay' });
+	}
+
 	private renderDynamicMarkdown(containerEl: HTMLElement, markdown: string, sourcePath: string) {
 		const processed = this.preprocessImageEmbeds(markdown, sourcePath);
 		return MarkdownRenderer.renderMarkdown(processed, containerEl, sourcePath, this);
@@ -759,10 +813,10 @@ export default class ConditionalRenderPlugin extends Plugin {
 		}
 
 		const hiddenText = hiddenTextOverride && hiddenTextOverride.trim() ? hiddenTextOverride : originalText;
-		if (this.settings.revealOnHover) containerEl.title = hiddenText;
-		else containerEl.removeAttribute('title');
 
 		if (isTextHiddenStyle(style)) {
+			if (this.settings.revealOnHover) containerEl.title = hiddenText;
+			else containerEl.removeAttribute('title');
 			containerEl.className = style === 'text-grey' || style === 'text-gray' ? 'cr-hidden-text-grey' : 'cr-hidden-text';
 			MarkdownRenderer.renderMarkdown(this.getHiddenReplacementText(hiddenTextOverride), containerEl, sourcePath, this).then(() => {
 				const p = containerEl.querySelector('p');
@@ -772,6 +826,13 @@ export default class ConditionalRenderPlugin extends Plugin {
 			return;
 		}
 
+		if (this.supportsRealImageHiddenStyle(style) && this.tryResolveSingleImageEmbed(hiddenText, sourcePath)) {
+			this.renderHiddenInlineImageInto(containerEl, style, hiddenText, sourcePath);
+			return;
+		}
+
+		if (this.settings.revealOnHover) containerEl.title = hiddenText;
+		else containerEl.removeAttribute('title');
 		containerEl.className = `cr-hidden-${style}${this.settings.revealOnHover ? '' : ' cr-no-hover-reveal'}`;
 		containerEl.textContent = hiddenText;
 	}
@@ -797,6 +858,11 @@ export default class ConditionalRenderPlugin extends Plugin {
 			void this.renderDynamicMarkdown(containerEl, this.getHiddenReplacementText(hiddenTextOverride), sourcePath).then(() => {
 				this.applyTextHiddenVariantStyle(containerEl, style);
 			});
+			return;
+		}
+
+		if (this.supportsRealImageHiddenStyle(style) && hiddenMarkdown.includes('![[')) {
+			void this.renderHiddenBlockMediaMaskInto(containerEl, style, hiddenMarkdown, sourcePath);
 			return;
 		}
 
