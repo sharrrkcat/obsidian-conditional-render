@@ -51,6 +51,7 @@ interface CRSelectOptionItem {
 type CRInputOptionValue = string | number | boolean | string[] | CRSelectOptionPair[];
 type CRControlElement = HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
 type CRInputSyntaxMode = 'typed' | 'legacy';
+type CRImportMode = 'update' | 'merge' | 'overwrite';
 
 interface ConditionalRenderSettings {
 	identifier: string;
@@ -2259,16 +2260,78 @@ class CRSettingTab extends PluginSettingTab {
 	plugin: ConditionalRenderPlugin;
 	showShortNames = false;
 	importExportText = '';
+	importMode: CRImportMode = 'overwrite';
 
 	constructor(app: App, plugin: ConditionalRenderPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
+	private getSettingsScrollContainer(): HTMLElement {
+		return (this.containerEl.closest('.vertical-tab-content-container') as HTMLElement | null) ?? this.containerEl.parentElement ?? this.containerEl;
+	}
+
+	private normalizeImportedVariables(parsed: unknown): CRVariable[] {
+		if (!Array.isArray(parsed)) throw new Error('Not an array');
+		const normalized: CRVariable[] = [];
+		const nameToIndex = new Map<string, number>();
+		for (const item of parsed) {
+			if (!item || typeof item !== 'object') throw new Error('Invalid shape');
+			const rawName = typeof (item as { name?: unknown }).name === 'string' ? (item as { name: string }).name.trim() : '';
+			const rawType = (item as { type?: unknown }).type;
+			if (!isValidVarName(rawName)) throw new Error('Invalid name');
+			if (rawType !== 'string' && rawType !== 'number' && rawType !== 'boolean') throw new Error('Invalid type');
+			let value = (item as { value?: unknown }).value;
+			let normalizedValue = '';
+			if (rawType === 'boolean') normalizedValue = String(value === true || value === 'true');
+			else if (rawType === 'number') {
+				const num = typeof value === 'number' ? value : Number(value ?? 0);
+				if (!Number.isFinite(num)) throw new Error('Invalid number');
+				normalizedValue = String(num);
+			} else normalizedValue = value == null ? '' : String(value);
+			const variable: CRVariable = { name: rawName, type: rawType, value: normalizedValue };
+			const existingIndex = nameToIndex.get(rawName);
+			if (existingIndex !== undefined) normalized[existingIndex] = variable;
+			else {
+				nameToIndex.set(rawName, normalized.length);
+				normalized.push(variable);
+			}
+		}
+		return normalized;
+	}
+
+	private applyImportedVariables(imported: CRVariable[], mode: CRImportMode): void {
+		const current = this.plugin.settings.variables;
+		if (mode === 'overwrite') {
+			this.plugin.settings.variables = imported;
+		} else if (mode === 'update') {
+			const importedMap = new Map(imported.map((variable) => [variable.name, variable]));
+			this.plugin.settings.variables = current.map((variable) => importedMap.get(variable.name) ?? variable);
+		} else {
+			const merged = [...current];
+			const indexByName = new Map(merged.map((variable, index) => [variable.name, index]));
+			for (const variable of imported) {
+				const existingIndex = indexByName.get(variable.name);
+				if (existingIndex !== undefined) merged[existingIndex] = variable;
+				else {
+					indexByName.set(variable.name, merged.length);
+					merged.push(variable);
+				}
+			}
+			this.plugin.settings.variables = merged;
+		}
+
+		if (!this.plugin.settings.variables.some((variable) => variable.name === this.plugin.settings.defaultVariable)) {
+			this.plugin.settings.defaultVariable = this.plugin.settings.variables[0]?.name ?? '';
+		}
+	}
+
 	display(): void {
 		const { containerEl } = this;
+		const scrollContainer = this.getSettingsScrollContainer();
+		const previousScrollTop = scrollContainer.scrollTop;
 		containerEl.empty();
-		containerEl.createEl('h2', { text: t('settings_title').replace('0.12.0', '0.18.1') });
+		containerEl.createEl('h2', { text: t('settings_title') });
 
 		new Setting(containerEl)
 			.setName(t('plugin_identifier_name'))
@@ -2501,20 +2564,39 @@ class CRSettingTab extends PluginSettingTab {
 			this.importExportText = json;
 		});
 
+		const importModeSetting = new Setting(containerEl)
+			.setName(t('import_mode_name'))
+			.setDesc(t('import_mode_desc'));
+
+		importModeSetting.addDropdown((drop) => {
+			drop.selectEl.style.width = '180px';
+			drop
+				.addOption('update', t('import_mode_opt_update'))
+				.addOption('merge', t('import_mode_opt_merge'))
+				.addOption('overwrite', t('import_mode_opt_overwrite'))
+				.setValue(this.importMode)
+				.onChange((value: CRImportMode) => {
+					this.importMode = value;
+				});
+		});
+
 		btnContainer.createEl('button', { text: t('btn_import'), cls: 'mod-cta' }).addEventListener('click', async () => {
 			try {
-				const parsed = JSON.parse(this.importExportText);
-				if (!Array.isArray(parsed)) throw new Error('Not an array');
-				if (!parsed.every((item) => item && typeof item.name === 'string' && typeof item.type === 'string' && 'value' in item)) {
-					throw new Error('Invalid shape');
-				}
-				this.plugin.settings.variables = parsed;
+				const imported = this.normalizeImportedVariables(JSON.parse(this.importExportText));
+				this.applyImportedVariables(imported, this.importMode);
 				await this.plugin.saveSettings({ refreshDynamic: true });
 				new Notice(t('import_success'));
 				this.display();
 			} catch {
 				new Notice(t('import_fail'));
 			}
+		});
+
+		window.requestAnimationFrame(() => {
+			scrollContainer.scrollTop = previousScrollTop;
+			window.setTimeout(() => {
+				scrollContainer.scrollTop = previousScrollTop;
+			}, 0);
 		});
 	}
 }
