@@ -58,6 +58,8 @@ interface ConditionalRenderSettings {
 	hiddenStyle: CRHiddenStyle;
 	hiddenCustomText: string;
 	revealOnHover: boolean;
+	showHoverRibbonIcon: boolean;
+	showDefaultVariableRibbonIcon: boolean;
 	defaultVariable: string;
 	variables: CRVariable[];
 }
@@ -104,6 +106,8 @@ const DEFAULT_SETTINGS: ConditionalRenderSettings = {
 	hiddenStyle: 'none',
 	hiddenCustomText: '[内容已隐藏]',
 	revealOnHover: true,
+	showHoverRibbonIcon: true,
+	showDefaultVariableRibbonIcon: true,
 	defaultVariable: 'plugin_status',
 	variables: [
 		{ name: 'plugin_status', type: 'boolean', value: 'true' },
@@ -203,6 +207,8 @@ export default class ConditionalRenderPlugin extends Plugin {
 	private readonly dynamicRenderElements = new Set<HTMLElement>();
 	private readonly expressionFnCache = new Map<string, Function | null>();
 	private readonly tempVariableStore = new Map<string, Record<string, unknown>>();
+	private hoverRibbonEl: HTMLElement | null = null;
+	private defaultVariableRibbonEl: HTMLElement | null = null;
 	private refreshTimer: number | null = null;
 	private dynamicRefreshRaf: number | null = null;
 	private dynamicRefreshFallbackTimer: number | null = null;
@@ -211,6 +217,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 	async onload() {
 		await this.loadSettings();
+		this.updateRibbonIcons();
 		this.addSettingTab(new CRSettingTab(this.app, this));
 		console.log(t('log_loaded').replace('0.12.0', '0.18.1'));
 
@@ -226,7 +233,82 @@ export default class ConditionalRenderPlugin extends Plugin {
 	}
 
 	onunload() {
+		this.hoverRibbonEl?.remove();
+		this.defaultVariableRibbonEl?.remove();
+		this.hoverRibbonEl = null;
+		this.defaultVariableRibbonEl = null;
 		console.log(t('log_unloaded'));
+	}
+
+
+	private getDefaultVariableAsBoolean(): boolean | null {
+		const defaultName = this.getDefaultVariable();
+		const variable = this.settings.variables.find((item) => item.name === defaultName);
+		if (!variable || variable.type !== 'boolean') return null;
+		return variable.value === 'true';
+	}
+
+	private async toggleRevealOnHoverFromRibbon() {
+		this.settings.revealOnHover = !this.settings.revealOnHover;
+		await this.saveSettings({ refreshViews: true, refreshDynamic: true });
+	}
+
+	private async toggleDefaultVariableFromRibbon() {
+		const defaultName = this.getDefaultVariable();
+		const variable = this.settings.variables.find((item) => item.name === defaultName);
+		if (!variable || variable.type !== 'boolean') {
+			new Notice(t('default_variable_toggle_unavailable_notice'));
+			return;
+		}
+		variable.value = variable.value === 'true' ? 'false' : 'true';
+		await this.saveSettings({ refreshDynamic: true });
+	}
+
+	private ensureHoverRibbonIcon() {
+		if (!this.settings.showHoverRibbonIcon) {
+			this.hoverRibbonEl?.remove();
+			this.hoverRibbonEl = null;
+			return;
+		}
+		if (!this.hoverRibbonEl) {
+			this.hoverRibbonEl = this.addRibbonIcon('eye', t('hover_ribbon_on_tooltip'), async () => {
+				await this.toggleRevealOnHoverFromRibbon();
+			});
+		}
+		const revealOnHover = this.settings.revealOnHover;
+		setIcon(this.hoverRibbonEl, revealOnHover ? 'eye' : 'eye-off');
+		this.hoverRibbonEl.setAttribute('aria-label', revealOnHover ? t('hover_ribbon_on_tooltip') : t('hover_ribbon_off_tooltip'));
+		this.hoverRibbonEl.setAttribute('title', revealOnHover ? t('hover_ribbon_on_tooltip') : t('hover_ribbon_off_tooltip'));
+	}
+
+	private ensureDefaultVariableRibbonIcon() {
+		if (!this.settings.showDefaultVariableRibbonIcon) {
+			this.defaultVariableRibbonEl?.remove();
+			this.defaultVariableRibbonEl = null;
+			return;
+		}
+		if (!this.defaultVariableRibbonEl) {
+			this.defaultVariableRibbonEl = this.addRibbonIcon('toggle-left', t('default_variable_ribbon_disabled_tooltip'), async () => {
+				await this.toggleDefaultVariableFromRibbon();
+			});
+		}
+		const defaultName = this.getDefaultVariable();
+		const boolValue = this.getDefaultVariableAsBoolean();
+		if (boolValue === null) {
+			setIcon(this.defaultVariableRibbonEl, 'toggle-left');
+			this.defaultVariableRibbonEl.setAttribute('aria-label', t('default_variable_ribbon_disabled_tooltip').replace('{name}', defaultName));
+			this.defaultVariableRibbonEl.setAttribute('title', t('default_variable_ribbon_disabled_tooltip').replace('{name}', defaultName));
+			return;
+		}
+		setIcon(this.defaultVariableRibbonEl, boolValue ? 'toggle-right' : 'toggle-left');
+		const tooltip = (boolValue ? t('default_variable_ribbon_on_tooltip') : t('default_variable_ribbon_off_tooltip')).replace('{name}', defaultName);
+		this.defaultVariableRibbonEl.setAttribute('aria-label', tooltip);
+		this.defaultVariableRibbonEl.setAttribute('title', tooltip);
+	}
+
+	private updateRibbonIcons() {
+		this.ensureHoverRibbonIcon();
+		this.ensureDefaultVariableRibbonIcon();
 	}
 
 	getDefaultVariable(): string {
@@ -2150,6 +2232,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 
 	async saveSettings(options: { refreshViews?: boolean; refreshDynamic?: boolean; changedPath?: string } = {}) {
 		await this.saveData(this.settings);
+		this.updateRibbonIcons();
 		this.syncAllInputs(undefined, { skipActiveControls: true });
 		if (options.refreshDynamic !== false) {
 			this.scheduleDynamicRefresh(options.changedPath);
@@ -2267,7 +2350,7 @@ class CRSettingTab extends PluginSettingTab {
 	plugin: ConditionalRenderPlugin;
 	showShortNames = false;
 	importExportText = '';
-	importMode: CRImportMode = 'overwrite';
+	importMode: CRImportMode = 'merge';
 
 	constructor(app: App, plugin: ConditionalRenderPlugin) {
 		super(app, plugin);
@@ -2286,12 +2369,38 @@ class CRSettingTab extends PluginSettingTab {
 		let current: HTMLElement | null = this.containerEl;
 		while (current) {
 			const style = window.getComputedStyle(current);
-			const canScroll = ['auto', 'scroll', 'overlay'].includes(style.overflowY) || current.classList.contains('vertical-tab-content-container') || current.classList.contains('vertical-tab-content');
+			const canScroll = ['auto', 'scroll', 'overlay'].includes(style.overflowY)
+				|| current.classList.contains('vertical-tab-content-container')
+				|| current.classList.contains('vertical-tab-content');
 			if (canScroll) targets.push(current);
 			current = current.parentElement;
 		}
+		const docScroller = this.containerEl.ownerDocument.scrollingElement as HTMLElement | null;
+		if (docScroller) targets.push(docScroller);
 		if (targets.length === 0) targets.push(this.getSettingsScrollContainer());
 		return Array.from(new Set(targets));
+	}
+
+	private createSectionHeading(parent: HTMLElement, key: Parameters<typeof t>[0]): void {
+		parent.createEl('h3', { text: t(key) });
+	}
+
+	private restoreSettingsScroll(previousScrolls: Array<{ el: HTMLElement; top: number }>): void {
+		const apply = () => {
+			for (const item of previousScrolls) {
+				item.el.scrollTop = item.top;
+			}
+		};
+		window.requestAnimationFrame(() => {
+			apply();
+			window.setTimeout(() => {
+				apply();
+				window.requestAnimationFrame(() => {
+					apply();
+					window.setTimeout(apply, 40);
+				});
+			}, 0);
+		});
 	}
 
 	private normalizeImportedVariables(parsed: unknown): CRVariable[] {
@@ -2356,6 +2465,8 @@ class CRSettingTab extends PluginSettingTab {
 		containerEl.empty();
 		containerEl.createEl('h2', { text: t('settings_title') });
 
+		this.createSectionHeading(containerEl, 'section_general_name');
+
 		new Setting(containerEl)
 			.setName(t('plugin_identifier_name'))
 			.setDesc(t('plugin_identifier_desc'))
@@ -2402,6 +2513,7 @@ class CRSettingTab extends PluginSettingTab {
 				toggle.setValue(this.plugin.settings.revealOnHover).onChange(async (value) => {
 					this.plugin.settings.revealOnHover = value;
 					await this.plugin.saveSettings({ refreshViews: true, refreshDynamic: true });
+					this.display();
 				});
 			});
 
@@ -2435,35 +2547,28 @@ class CRSettingTab extends PluginSettingTab {
 		const getName = (full: string, short: string) => (this.showShortNames ? `${id}-${short}` : `${id}-${full}`);
 		const exText = t('legend_example_text');
 		const exInput = t('legend_custom_input');
+		const hoverRevealClass = this.plugin.settings.revealOnHover ? '' : ' cr-no-hover-reveal';
+		const hoverRevealTitleAttr = this.plugin.settings.revealOnHover ? ` title="${exText}"` : '';
+		const hoverSample = (baseClass: string) => `<span class="${baseClass}${hoverRevealClass}"${hoverRevealTitleAttr}>${exText}</span>`;
 
 		const legendEl = containerEl.createDiv({ cls: 'cr-style-legend' });
 		legendEl.innerHTML = `
 			<div class="cr-legend-item"><code>${getName('none', 'n')}</code></div>
-			<div class="cr-legend-item"><code>${getName('underline', 'u')}</code> <span class="cr-hidden-underline" title="${exText}">${exText}</span></div>
-			<div class="cr-legend-item"><code>${getName('spoiler-white', 'spw')}</code> <span class="cr-hidden-spoiler-white" title="${exText}">${exText}</span></div>
+			<div class="cr-legend-item"><code>${getName('underline', 'u')}</code> ${hoverSample('cr-hidden-underline')}</div>
+			<div class="cr-legend-item"><code>${getName('spoiler-white', 'spw')}</code> ${hoverSample('cr-hidden-spoiler-white')}</div>
 			<div class="cr-legend-item"><code>${getName('text', 't')}</code> <span class="cr-hidden-text">${exInput}</span></div>
 			<div class="cr-legend-item"><code>${getName('text-grey', 'tg')}</code> <span class="cr-hidden-text-grey">${exInput}</span></div>
-			<div class="cr-legend-item"><code>${getName('spoiler-white-round', 'spwr')}</code> <span class="cr-hidden-spoiler-white-round" title="${exText}">${exText}</span></div>
-			<div class="cr-legend-item"><code>${getName('blank', 'b')}</code> <span class="cr-hidden-blank" title="${exText}">${exText}</span></div>
-			<div class="cr-legend-item"><code>${getName('spoiler', 'sp')}</code> <span class="cr-hidden-spoiler" title="${exText}">${exText}</span></div>
-			<div class="cr-legend-item"><code>${getName('spoiler-round', 'spr')}</code> <span class="cr-hidden-spoiler-round" title="${exText}">${exText}</span></div>
+			<div class="cr-legend-item"><code>${getName('spoiler-white-round', 'spwr')}</code> ${hoverSample('cr-hidden-spoiler-white-round')}</div>
+			<div class="cr-legend-item"><code>${getName('blank', 'b')}</code> ${hoverSample('cr-hidden-blank')}</div>
+			<div class="cr-legend-item"><code>${getName('spoiler', 'sp')}</code> ${hoverSample('cr-hidden-spoiler')}</div>
+			<div class="cr-legend-item"><code>${getName('spoiler-round', 'spr')}</code> ${hoverSample('cr-hidden-spoiler-round')}</div>
 		`;
 
-		const variablesHeader = new Setting(containerEl)
+		this.createSectionHeading(containerEl, 'section_variables_name');
+
+		new Setting(containerEl)
 			.setName(t('variables_header_name'))
 			.setDesc(t('variables_header_desc'));
-
-		variablesHeader.addButton((button) =>
-			button.setButtonText(t('btn_add_variable')).setCta().onClick(async () => {
-				this.plugin.settings.variables.push({
-					name: `var_${this.plugin.settings.variables.length + 1}`,
-					type: 'string',
-					value: '',
-				});
-				await this.plugin.saveSettings({ refreshDynamic: true });
-				this.display();
-			}),
-		);
 
 		this.plugin.settings.variables.forEach((variable, index) => {
 			const variableRow = new Setting(containerEl);
@@ -2574,7 +2679,42 @@ class CRSettingTab extends PluginSettingTab {
 			);
 		});
 
-		containerEl.createEl('hr');
+		new Setting(containerEl).addButton((button) =>
+			button.setButtonText(t('btn_add_variable')).setCta().onClick(async () => {
+				this.plugin.settings.variables.push({
+					name: `var_${this.plugin.settings.variables.length + 1}`,
+					type: 'string',
+					value: '',
+				});
+				await this.plugin.saveSettings({ refreshDynamic: true });
+				this.display();
+			}),
+		);
+
+		this.createSectionHeading(containerEl, 'section_ribbon_name');
+
+		new Setting(containerEl)
+			.setName(t('show_default_variable_ribbon_icon_name'))
+			.setDesc(t('show_default_variable_ribbon_icon_desc'))
+			.addToggle((toggle) => {
+				toggle.setValue(this.plugin.settings.showDefaultVariableRibbonIcon).onChange(async (value) => {
+					this.plugin.settings.showDefaultVariableRibbonIcon = value;
+					await this.plugin.saveSettings({ refreshDynamic: false, refreshViews: false });
+				});
+			});
+
+		new Setting(containerEl)
+			.setName(t('show_hover_ribbon_icon_name'))
+			.setDesc(t('show_hover_ribbon_icon_desc'))
+			.addToggle((toggle) => {
+				toggle.setValue(this.plugin.settings.showHoverRibbonIcon).onChange(async (value) => {
+					this.plugin.settings.showHoverRibbonIcon = value;
+					await this.plugin.saveSettings({ refreshDynamic: false, refreshViews: false });
+				});
+			});
+
+		this.createSectionHeading(containerEl, 'section_import_export_name');
+
 		new Setting(containerEl).setName(t('import_export_name')).setDesc(t('import_export_desc'));
 
 		const importModeSetting = new Setting(containerEl)
@@ -2625,14 +2765,6 @@ class CRSettingTab extends PluginSettingTab {
 			}
 		});
 
-		window.requestAnimationFrame(() => {
-			for (const item of previousScrolls) item.el.scrollTop = item.top;
-			window.setTimeout(() => {
-				for (const item of previousScrolls) item.el.scrollTop = item.top;
-				window.requestAnimationFrame(() => {
-					for (const item of previousScrolls) item.el.scrollTop = item.top;
-				});
-			}, 0);
-		});
+		this.restoreSettingsScroll(previousScrolls);
 	}
 }
