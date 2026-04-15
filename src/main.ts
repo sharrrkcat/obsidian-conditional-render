@@ -435,8 +435,56 @@ export default class ConditionalRenderPlugin extends Plugin {
 		containerEl.empty();
 	}
 
+	private escapeHtmlAttribute(value: string): string {
+		return value
+			.replace(/&/g, '&amp;')
+			.replace(/"/g, '&quot;')
+			.replace(/</g, '&lt;')
+			.replace(/>/g, '&gt;');
+	}
+
+	private resolveImageEmbedHtml(rawTarget: string, sourcePath: string): string | null {
+		const trimmed = rawTarget.trim();
+		if (!trimmed) return null;
+
+		const pipeIndex = trimmed.indexOf('|');
+		const linkpath = (pipeIndex >= 0 ? trimmed.slice(0, pipeIndex) : trimmed).trim();
+		const sizeSpec = (pipeIndex >= 0 ? trimmed.slice(pipeIndex + 1) : '').trim();
+		if (!linkpath) return null;
+
+		const ext = linkpath.split('.').pop()?.toLowerCase() ?? '';
+		if (!['png', 'jpg', 'jpeg', 'gif', 'webp', 'bmp', 'svg', 'avif'].includes(ext)) return null;
+
+		const resolved = this.app.metadataCache.getFirstLinkpathDest(linkpath, sourcePath)
+			?? this.app.vault.getAbstractFileByPath(linkpath);
+		if (!(resolved instanceof TFile)) return null;
+
+		const resourcePath = this.app.vault.getResourcePath(resolved);
+		let widthAttr = '';
+		let heightAttr = '';
+		if (sizeSpec) {
+			const sizeMatch = sizeSpec.match(/^(\d+)(?:x(\d+))?$/i);
+			if (sizeMatch) {
+				widthAttr = ` width="${this.escapeHtmlAttribute(sizeMatch[1])}"`;
+				if (sizeMatch[2]) heightAttr = ` height="${this.escapeHtmlAttribute(sizeMatch[2])}"`;
+			}
+		}
+
+		const alt = this.escapeHtmlAttribute(resolved.basename);
+		const src = this.escapeHtmlAttribute(resourcePath);
+		return `<img src="${src}" alt="${alt}"${widthAttr}${heightAttr} class="cr-inline-image-embed" />`;
+	}
+
+	private preprocessImageEmbeds(markdown: string, sourcePath: string): string {
+		return markdown.replace(/!\[\[([^[\]]+)\]\]/g, (full, inner) => {
+			const html = this.resolveImageEmbedHtml(String(inner), sourcePath);
+			return html ?? full;
+		});
+	}
+
 	private renderDynamicMarkdown(containerEl: HTMLElement, markdown: string, sourcePath: string) {
-		return MarkdownRenderer.renderMarkdown(markdown, containerEl, sourcePath, this);
+		const processed = this.preprocessImageEmbeds(markdown, sourcePath);
+		return MarkdownRenderer.renderMarkdown(processed, containerEl, sourcePath, this);
 	}
 
 	private applyTextHiddenVariantStyle(containerEl: HTMLElement, style: CRHiddenStyle) {
@@ -511,9 +559,12 @@ export default class ConditionalRenderPlugin extends Plugin {
 	private splitTopLevelPipe(input: string, maxParts = 3): string[] {
 		const parts: string[] = [];
 		let current = '';
-		let depth = 0;
-		let quote: '"' | "'" | null = null;
+		let parenDepth = 0;
+		let bracketDepth = 0;
+		let braceDepth = 0;
+		let quote: '"' | "'" | '`' | null = null;
 		let escapeNext = false;
+		let wikiLinkDepth = 0;
 
 		for (let index = 0; index < input.length; index += 1) {
 			const char = input[index];
@@ -530,27 +581,66 @@ export default class ConditionalRenderPlugin extends Plugin {
 				escapeNext = true;
 				continue;
 			}
+
+			if (!quote && char === '[' && next === '[') {
+				wikiLinkDepth += 1;
+				current += '[[';
+				index += 1;
+				continue;
+			}
+			if (!quote && wikiLinkDepth > 0 && char === ']' && next === ']') {
+				wikiLinkDepth = Math.max(0, wikiLinkDepth - 1);
+				current += ']]';
+				index += 1;
+				continue;
+			}
+
 			if (quote) {
 				current += char;
 				if (char === quote) quote = null;
 				continue;
 			}
-			if (char === '"' || char === "'") {
-				quote = char as '"' | "'";
+			if (wikiLinkDepth === 0 && (char === '"' || char === "'" || char === '`')) {
+				quote = char as '"' | "'" | '`';
 				current += char;
 				continue;
 			}
-			if (char === '(') {
-				depth += 1;
-				current += char;
-				continue;
+
+			if (wikiLinkDepth === 0) {
+				if (char === '(') {
+					parenDepth += 1;
+					current += char;
+					continue;
+				}
+				if (char === ')') {
+					parenDepth = Math.max(0, parenDepth - 1);
+					current += char;
+					continue;
+				}
+				if (char === '[') {
+					bracketDepth += 1;
+					current += char;
+					continue;
+				}
+				if (char === ']') {
+					bracketDepth = Math.max(0, bracketDepth - 1);
+					current += char;
+					continue;
+				}
+				if (char === '{') {
+					braceDepth += 1;
+					current += char;
+					continue;
+				}
+				if (char === '}') {
+					braceDepth = Math.max(0, braceDepth - 1);
+					current += char;
+					continue;
+				}
 			}
-			if (char === ')') {
-				depth = Math.max(0, depth - 1);
-				current += char;
-				continue;
-			}
-			if (char === '|' && prev !== '|' && next !== '|' && depth === 0 && parts.length < maxParts - 1) {
+
+			const atTopLevel = wikiLinkDepth === 0 && parenDepth === 0 && bracketDepth === 0 && braceDepth === 0;
+			if (char === '|' && prev !== '|' && next !== '|' && atTopLevel && parts.length < maxParts - 1) {
 				parts.push(current);
 				current = '';
 				continue;
@@ -667,15 +757,46 @@ export default class ConditionalRenderPlugin extends Plugin {
 		return content;
 	}
 
+	private renderInlineMarkdownInto(containerEl: HTMLElement, markdown: string, sourcePath: string) {
+		this.clearDynamicContainer(containerEl);
+		const tempContainer = document.createElement('span');
+		const processed = this.preprocessImageEmbeds(markdown, sourcePath);
+		return MarkdownRenderer.renderMarkdown(processed, tempContainer, sourcePath, this).then(() => {
+			const nonEmptyNodes = Array.from(tempContainer.childNodes).filter((node) => {
+				return !(node.nodeType === Node.TEXT_NODE && !(node.textContent ?? '').trim());
+			});
+
+			if (
+				nonEmptyNodes.length === 1 &&
+				nonEmptyNodes[0] instanceof HTMLElement &&
+				nonEmptyNodes[0].tagName === 'P'
+			) {
+				const paragraph = nonEmptyNodes[0] as HTMLParagraphElement;
+				while (paragraph.firstChild) {
+					containerEl.appendChild(paragraph.firstChild);
+				}
+				paragraph.remove();
+			} else {
+				while (tempContainer.firstChild) {
+					containerEl.appendChild(tempContainer.firstChild);
+				}
+			}
+		});
+	}
+
 	private refreshDynamicRender(element: HTMLElement) {
 		if (!element.isConnected) return;
 		const binding = this.getDynamicRenderBinding(element);
 		if (!binding) return;
 
 		if (binding.kind === 'inline-expression') {
-			this.clearDynamicContainer(element);
 			const result = this.evaluateExpression(binding.expression ?? '', binding.sourcePath);
-			element.textContent = result !== undefined ? String(result) : `[Error: ${binding.expression ?? ''}]`;
+			if (result !== undefined) {
+				void this.renderInlineMarkdownInto(element, String(result), binding.sourcePath);
+			} else {
+				this.clearDynamicContainer(element);
+				element.textContent = `[Error: ${binding.expression ?? ''}]`;
+			}
 			return;
 		}
 
@@ -684,8 +805,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			const defaultVar = this.getDefaultVariable();
 			const isTrue = !!this.evaluateExpression(defaultVar, binding.sourcePath);
 			if (isTrue) {
-				this.clearDynamicContainer(element);
-				element.textContent = content;
+				void this.renderInlineMarkdownInto(element, content, binding.sourcePath);
 			} else {
 				this.renderHiddenInlineInto(element, binding.style ?? this.settings.hiddenStyle, content, binding.sourcePath, binding.hiddenTextOverride);
 			}
@@ -696,8 +816,7 @@ export default class ConditionalRenderPlugin extends Plugin {
 			const isTrue = !!this.evaluateExpression(binding.condition ?? 'true', binding.sourcePath);
 			const content = this.computeInlineDefaultContent(binding.rawContent ?? '', binding.sourcePath);
 			if (isTrue) {
-				this.clearDynamicContainer(element);
-				element.textContent = content;
+				void this.renderInlineMarkdownInto(element, content, binding.sourcePath);
 			} else {
 				this.renderHiddenInlineInto(element, binding.style ?? this.settings.hiddenStyle, content, binding.sourcePath, binding.hiddenTextOverride);
 			}
